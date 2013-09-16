@@ -1,0 +1,7 @@
+#!/bin/bash
+
+! status -q vnc-package || stop -q vnc-server
+
+if [ $1 == "install" -o $1 == "upgrade" ]; then
+    :
+fi
