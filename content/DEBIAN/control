@@ -1,6 +1,6 @@
 Origin: XBian
 Package: xbian-package-vnc-server
-Version: 1.0.0-3a
+Version: 1.0.0-3b
 Essential: No
 Priority: optional
 Section: net
