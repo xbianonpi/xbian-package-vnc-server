@@ -1,0 +1,18 @@
+### /etc/default/vnc-autores
+# Configuration file for /usr/bin/local/vnc-autores
+###
+
+# Enable auto mode? ('vnc-autores auto' will be called when starting/stopping vnc-server)
+# 0: no
+# 1: yes
+AUTOMODE=0
+
+# GROUP and MODE for VNC use
+# Get all supported modes by calling: tvservice -m DMT && tvservice -m CEA
+VNCGROUP=DMT
+VNCMODE=2
+
+# DON'T EDIT ANYTHING BELOW HERE!
+# (reserved for temporary vars)
+TVGROUP=
+TVMODE=

@@ -1,0 +1,118 @@
+#! /bin/bash
+### /usr/local/bin/vnc-autores
+# This script get called by /etc/init/vnc-autores-controller.conf when
+# starting/stopping vnc-server service to adjust screen resolution.
+###
+
+set +e
+set -x
+
+# set name and config file
+NAME=vnc-autores
+CONFIGFILE=/etc/default/$NAME
+
+# check for sudo
+if [ "$UID" -ne 0 ]; then
+  echo "$NAME: requires root privileges (run with sudo)" >&2
+  exit 1
+fi
+
+# check config file
+if [ -r $CONFIGFILE ]; then
+	. $CONFIGFILE
+
+	if ! [[ $AUTOMODE =~ ^0$|^1$ ]] || ! [[ $VNCGROUP =~ ^DMT$|^CEA$  ]] || ! [[ $VNCMODE =~ ^[0-9]+$ ]]; then
+		logger -s -t "ERROR" "$NAME: invalid configuration file ($CONFIGFILE)"
+		exit 2
+	fi
+else
+	logger -s -t "ERROR" "$NAME: no configuration file found ($CONFIGFILE)"
+	exit 2
+fi
+
+# check for enable/disable arguments
+case "$1" in
+	enable)
+		sed -i "s@AUTOMODE=0@AUTOMODE=1@" $CONFIGFILE
+		echo "$NAME: enabled" >&1
+		exit 0
+		;;
+	disable)
+		sed -i "s@AUTOMODE=1@AUTOMODE=0@" $CONFIGFILE
+		echo "$NAME: disabled" >&1
+		exit 0
+		;;
+	*)
+		;;
+esac
+
+# check if autores is disabled
+if [ $AUTOMODE != 1 ]; then
+	echo "$NAME: automode is disabled, run 'vnc-autores enable' first" >&1
+	exit 0
+fi
+
+# get current tvservice state
+STATE=$(tvservice -s)
+GROUP=$(echo "$STATE" | egrep -o 'DMT|CEA')
+MODE=$(echo "$STATE" | egrep -o '\([0-9]+\)'); MODE=${MODE:1:-1}
+
+# function for restarting xbmc
+restart_xbmc(){
+	reload -q xbmc
+}
+
+# function for going into VNC mode
+go_vnc(){
+	if [ "$GROUP $MODE" != "$VNCGROUP $VNCMODE" ]
+	then
+		# save current tvservice state
+		grep -q ^TVGROUP $CONFIGFILE || echo 'TVGROUP=' >> $CONFIGFILE
+		grep -q ^TVMODE $CONFIGFILE || echo 'TVMODE=' >> $CONFIGFILE
+		sed -i "s%TVGROUP=.*%TVGROUP=$GROUP%" $CONFIGFILE
+		sed -i "s%TVMODE=.*%TVMODE=$MODE%" $CONFIGFILE
+	
+		# switch to VNC mode
+		tvservice -e "$VNCGROUP $VNCMODE" > /dev/null
+		
+		restart_xbmc
+		echo "$NAME: switched to VNC mode" >&1
+	else
+		echo "$NAME: already in VNC mode" >&1
+	fi
+}
+
+# function for going into TV mode
+go_tv(){
+	if [ "$GROUP $MODE" = "$VNCGROUP $VNCMODE" ]
+	then
+		# check if former TV settings are setted/valid
+		if [[ $TVGROUP =~ DMT|CEA  ]] && [[ $TVMODE =~ ^[0-9]+$ ]]
+		then
+			# switch to former TV settings
+			tvservice -e "$TVGROUP $TVMODE" > /dev/null
+		else
+			# switch to preferred TV settings
+			echo "$NAME: no former TV settings found, using preferred" >&1
+			tvservice -p > /dev/null
+		fi
+		
+		restart_xbmc
+		echo "$NAME: switched to TV mode" >&1
+	else
+		echo "$NAME: already in TV mode" >&1
+	fi
+}
+
+case $UPSTART_EVENTS in
+    starting)
+	go_vnc
+	;;
+    stopped)
+	go_tv
+	;;
+    *)
+	;;
+esac
+
+exit 0
