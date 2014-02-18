@@ -3,6 +3,8 @@
 
 if [ $1 == "configure" ]; then
 
+    chmod 664 /etc/default/vnc-autores
+
     reload -q vnc-server 2>/dev/null|| :
 
 fi
