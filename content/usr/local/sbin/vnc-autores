@@ -1,11 +1,10 @@
-#! /bin/bash
+#!/bin/bash +e
 ### /usr/local/bin/vnc-autores
 # This script get called by /etc/init/vnc-autores-controller.conf when
 # starting/stopping vnc-server service to adjust screen resolution.
 ###
 
-set +e
-set -x
+[ $(xbian-arch) != RPI ] && exit 0
 
 # set name and config file
 NAME=vnc-autores
