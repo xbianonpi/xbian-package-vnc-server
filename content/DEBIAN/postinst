@@ -5,6 +5,8 @@ if [ $1 == "configure" ]; then
 
     chmod 664 /etc/default/vnc-autores
 
+    echo uinput >> /etc/modules
+
     reload -q vnc-server 2>/dev/null|| :
 
 fi
