@@ -1,0 +1,10 @@
+Origin: XBian
+Package: xbian-package-vnc-server
+Version: 1.2.0
+Essential: No
+Priority: optional
+Section: net
+Architecture: armhf
+Depends: xbian-package-firmware | firmware-imx, libc6, libvncserver0, zlib1g, libgcc1, libgpg-error0, libp11-kit-dev
+Maintainer: mk01 <development@xbian.org>
+Description: VNC Server for RPI and Cubox-i
