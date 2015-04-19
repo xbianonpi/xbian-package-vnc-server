@@ -29,8 +29,8 @@
  */
 
 /* define the following to enable debug messages */
-/* #define DEBUG */
-/* #define DEBUG_VERBOSE */
+#define DEBUG
+#define DEBUG_VERBOSE
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,6 +47,7 @@
 #include <linux/fb.h>
 #include <linux/input.h>
 #include <linux/uinput.h>
+#include <linux/fb.h>
 
 #include <assert.h>
 #include <errno.h>
@@ -71,18 +72,29 @@
 
 #define APPNAME "imxvncserver"
 
+#include <stdio.h>
+#include <openssl/md4.h>
+
+#include "xxhash.h"
+
 static struct fb_var_screeninfo scrinfo;
-static int buffers = 2; 
 static int fbfd = -1;
 static int kbdfd = -1;
 static int touchfd = -1;
-static unsigned short int *fbmmap = MAP_FAILED;
-static unsigned short int *vncbuf;
-static unsigned short int *fbbuf;
-static int pixels_per_int;
+//static unsigned short int *fbmmap = MAP_FAILED;
+unsigned char *fbmmap = MAP_FAILED;
+//static unsigned short int *vncbuf;
+unsigned char *vncbuf = NULL;
+//static unsigned short int *fbbuf;
+static int cmp_lines = 2;
 
-size_t pixels;
-size_t bytespp;
+MD4_CTX mdContext;
+struct hash_t {
+	unsigned char md[MD4_DIGEST_LENGTH];
+	uint32_t xxh32;
+};
+
+struct hash_t *fb_hashtable;
 
 int relative_mode = 0;
 int last_x;
@@ -105,6 +117,8 @@ static struct varblock_t {
 	int g_offset;
 	int b_offset;
 	int pixels_per_int;
+	size_t bytespp;
+	size_t pixels;
 } varblock;
 
 /* event handler callback */
@@ -133,6 +147,9 @@ static void doptr(int buttonMask, int x, int y, rfbClientPtr cl);
 
 static void init_fb(void)
 {
+        struct fb_fix_screeninfo finfo;
+        unsigned long page_mask, fb_mem_offset;
+
 	if ((fbfd = open(FB_DEVICE, O_RDONLY)) == -1) {
 		perror("open");
 		exit(EXIT_FAILURE);
@@ -142,9 +159,13 @@ static void init_fb(void)
 		perror("ioctl");
 		exit(EXIT_FAILURE);
 	}
+        if (ioctl(fbfd, FBIOGET_FSCREENINFO, &finfo) != 0) {
+                perror("ioctl FBIOGET_FSCREENINFO");
+                exit(EXIT_FAILURE);
+        }
 
-	pixels = scrinfo.xres * scrinfo.yres;
-	bytespp = scrinfo.bits_per_pixel / 8;
+	varblock.pixels = scrinfo.xres * scrinfo.yres;
+	varblock.bytespp = scrinfo.bits_per_pixel / 8;
 
 	pr_info("xres=%d, yres=%d, "
 			"xresv=%d, yresv=%d, "
@@ -155,20 +176,30 @@ static void init_fb(void)
 	  (int)scrinfo.xoffset, (int)scrinfo.yoffset,
 	  (int)scrinfo.bits_per_pixel);
 
-	fbmmap = mmap(NULL, buffers * pixels * bytespp,
-			PROT_READ, MAP_SHARED, fbfd, 0);
+        page_mask = (unsigned long)getpagesize()-1;
+        fb_mem_offset = (unsigned long)(finfo.smem_start) & page_mask;
+
+	fbmmap = mmap(NULL, (scrinfo.yres_virtual/scrinfo.yres) * varblock.pixels * varblock.bytespp/*finfo.smem_len+fb_mem_offset*/,
+			PROT_READ, MAP_SHARED | MAP_NORESERVE, fbfd, 0);
 
 	if (fbmmap == MAP_FAILED) {
 		perror("mmap");
 		exit(EXIT_FAILURE);
 	}
+	pr_info("fbmmap addr %lx\n", (long)fbmmap);
+
+	/* Bit shifts */
+	varblock.r_offset = scrinfo.red.offset + scrinfo.red.length - 5;
+	varblock.g_offset = scrinfo.green.offset + scrinfo.green.length - 5;
+	varblock.b_offset = scrinfo.blue.offset + scrinfo.blue.length - 5;
+	varblock.pixels_per_int = sizeof(unsigned int) / (scrinfo.bits_per_pixel / 8);
 }
 
 static void cleanup_fb(void)
 {
         if(fbmmap)
         {
-                munmap(fbmmap, buffers * pixels * bytespp);
+                munmap(fbmmap, (scrinfo.yres_virtual/scrinfo.yres) * varblock.pixels * varblock.bytespp);
         }
 	if(fbfd != -1)
 	{
@@ -190,7 +221,7 @@ static void init_uinput()
         }
 
         memset(&uinp, 0, sizeof(uinp));
-        strncpy(uinp.name, "VNC", 20);
+        strncpy(uinp.name, "Dell USB Keyboard", 20);
         uinp.id.version = 4;
         uinp.id.bustype = BUS_USB;
 
@@ -246,27 +277,34 @@ static void cleanup_kbd()
 
 static void init_fb_server(int argc, char **argv)
 {
+
 	pr_info("Initializing server...\n");
 
 	/* Allocate the VNC server buffer to be managed (not manipulated) by 
 	 * libvncserver. */
-	vncbuf = calloc(scrinfo.xres * scrinfo.yres, scrinfo.bits_per_pixel / 2);
+//	vncbuf = calloc(scrinfo.xres * scrinfo.yres, scrinfo.bits_per_pixel / 2);
+	vncbuf = calloc(scrinfo.xres * scrinfo.yres, scrinfo.bits_per_pixel / 8);
 	assert(vncbuf != NULL);
+	pr_info("vncbuf addr %lx\n", (long)vncbuf);
 
 	/* Allocate the comparison buffer for detecting drawing updates from frame
 	 * to frame. */
-	fbbuf = calloc(scrinfo.xres * scrinfo.yres, scrinfo.bits_per_pixel / 2);
-	assert(fbbuf != NULL);
+//	fbbuf = calloc(scrinfo.xres * scrinfo.yres, scrinfo.bits_per_pixel / 2);
+	fb_hashtable = calloc(scrinfo.yres / cmp_lines, sizeof(struct hash_t));
+//	assert(fbbuf != NULL);
+	pr_info("fb_hashtable addr %lx\n", (long)fb_hashtable);
+	assert(fb_hashtable);
+	memset(fb_hashtable, 0x0, scrinfo.yres / cmp_lines * sizeof(struct hash_t));
 
 	vncscr = rfbGetScreen(&argc, argv, scrinfo.xres, scrinfo.yres,
-			5, /* bits per sample */
-			2, /* samples per pixel */
+			5, /* 8 bits per sample */
+			2, /* 2 samples per pixel */
 			scrinfo.bits_per_pixel / 8  /* bytes/sample */ );
 
 	assert(vncscr != NULL);
 
 	vncscr->desktopName = APPNAME;
-	vncscr->frameBuffer = (char *)vncbuf;
+	vncscr->frameBuffer = vncbuf;
 	vncscr->alwaysShared = TRUE;
 	vncscr->httpDir = NULL;
 	vncscr->port = VNC_PORT;
@@ -279,11 +317,6 @@ static void init_fb_server(int argc, char **argv)
 	/* Mark as dirty since we haven't sent any updates at all yet. */
 	rfbMarkRectAsModified(vncscr, 0, 0, scrinfo.xres, scrinfo.yres);
 
-	/* Bit shifts */
-	varblock.r_offset = scrinfo.red.offset + scrinfo.red.length - 5;
-	varblock.g_offset = scrinfo.green.offset + scrinfo.green.length - 5;
-	varblock.b_offset = scrinfo.blue.offset + scrinfo.blue.length - 5;
-	varblock.pixels_per_int = 8 * sizeof(int) / scrinfo.bits_per_pixel;
 }
 
 /*****************************************************************************/
@@ -581,63 +614,85 @@ static int get_framebuffer_yoffset()
 	((p >> r) & 0x1f001f) | \
 	(((p >> g) & 0x1f001f) << 5) | \
 	(((p >> b) & 0x1f001f) << 10)
+//#define PIXEL_FB_TO_RFB(p,r,g,b) \
+//	((p >> r)) | \
+//	(((p >> g)) << 5) | \
+//	(((p >> b)) << 10)
 
 static void update_screen(void)
 {
-	unsigned int *f, *c, *r;
+	unsigned int *f;
+//	unsigned char c[MD4_DIGEST_LENGTH];
+	uint32_t c;
+	unsigned int *r;
 	int x, y, y_virtual;
+	int oldx = scrinfo.xres, oldy = scrinfo.yres;
 
 	/* get virtual screen info */
 	y_virtual = get_framebuffer_yoffset();
 	if (y_virtual < 0)
 		y_virtual = 0; /* no info, have to assume front buffer */
 
+		if (oldx != scrinfo.xres ||  oldy != scrinfo.yres) {
+			vncscr->width = scrinfo.xres;
+			vncscr->height = scrinfo.yres;
+		}
+		rfbProcessEvents(vncscr, 1000); /* update quickly */
+
 	varblock.min_x = varblock.min_y = INT_MAX;
 	varblock.max_x = varblock.max_y = -1;
 
-	f = (unsigned int *)fbmmap;        /* -> framebuffer         */
-	c = (unsigned int *)fbbuf;         /* -> compare framebuffer */
-	r = (unsigned int *)vncbuf;        /* -> remote framebuffer  */
-
 	/* jump to right virtual screen */
-	f += y_virtual * scrinfo.xres / varblock.pixels_per_int;
+	pr_info(" %d :::: %d \n", y_virtual, varblock.pixels_per_int);
+	for (y = 0; y < (int) scrinfo.yres; y+=cmp_lines) {
+		f = (unsigned int *)(fbmmap + ((y_virtual + y) * scrinfo.xres * varblock.bytespp));
+//		MD4((unsigned char *)f, scrinfo.xres * cmp_lines * varblock.bytespp, &c[0]);
+//		if (!memcmp(&c[0], &(fb_hashtable[y/cmp_lines].md[0]), MD4_DIGEST_LENGTH))
+		c = XXH32((unsigned char *)f, scrinfo.xres * cmp_lines * varblock.bytespp, 0);
+		if (c == fb_hashtable[y/cmp_lines].xxh32)
+			continue;
 
-	for (y = 0; y < (int) scrinfo.yres; y++) {
-		/* Compare every 2 pixels at a time, assuming that changes are
-		 * likely in pairs. */
-		for (x = 0; x < (int) scrinfo.xres; x += varblock.pixels_per_int) {
+		r = (unsigned int *)(vncbuf + (y * scrinfo.xres * varblock.bytespp));
+//		memcpy(&(fb_hashtable[y/cmp_lines].md[0]), &c[0], MD4_DIGEST_LENGTH);
+		fb_hashtable[y/cmp_lines].xxh32 = c;
+
+		for (x = 0; x < (int) scrinfo.xres * cmp_lines; x += varblock.pixels_per_int) {
 			unsigned int pixel = *f;
 
-			if (pixel != *c) {
-				*c = pixel; /* update compare buffer */
+//			pr_info("x %d\n", x);
+//			if (pixel != *c) {
+//				*c = pixel; /* update compare buffer */
 
 				/* XXX: Undo the checkered pattern to test the
 				 * efficiency gain using hextile encoding. */
-				if (pixel == 0x18e320e4 || pixel == 0x20e418e3)
-					pixel = 0x18e318e3; /* still needed? */
+//				if (pixel == 0x18e320e4 || pixel == 0x20e418e3)
+//					pixel = 0x18e318e3; /* still needed? */
 
 				/* update remote buffer */
+//				*r = pixel;
 				*r = PIXEL_FB_TO_RFB(pixel,
 						varblock.r_offset,
 						varblock.g_offset,
 						varblock.b_offset);
 
-				if (x < varblock.min_x)
+/*				if (x < varblock.min_x)
 					varblock.min_x = x;
-				else {
-					if (x > varblock.max_x)
-						varblock.max_x = x;
-				}
-
-				if (y < varblock.min_y)
-					varblock.min_y = y;
-				else if (y > varblock.max_y)
-					varblock.max_y = y;
-			}
-
-			f++, c++;
+				else if (x > varblock.max_x)
+					varblock.max_x = x;
+*/
+//			}
+			f++;
 			r++;
 		}
+		if (y < varblock.min_y)
+			varblock.min_y = y;
+		if (y + cmp_lines> varblock.max_y)
+			varblock.max_y = y + cmp_lines;
+	}
+
+	if (varblock.min_y != INT_MAX) {
+		varblock.min_x = 0;
+		varblock.max_x = scrinfo.xres-1;
 	}
 
 	if (varblock.min_x < INT_MAX) {
@@ -648,24 +703,27 @@ static void update_screen(void)
 			varblock.max_y = varblock.min_y;
 
 		pr_vdebug("Changed frame: %dx%d @ (%d,%d)...\n",
-		  (varblock.max_x + 2) - varblock.min_x,
-		  (varblock.max_y + 1) - varblock.min_y,
+		  (varblock.max_x) - varblock.min_x,
+		  (varblock.max_y) - varblock.min_y,
 		  varblock.min_x, varblock.min_y);
 
 		rfbMarkRectAsModified(vncscr, varblock.min_x, varblock.min_y,
-		  varblock.max_x + 2, varblock.max_y + 1);
+		  varblock.max_x, varblock.max_y);
 
-		rfbProcessEvents(vncscr, 10000); /* update quickly */
+		rfbProcessEvents(vncscr, 1000); /* update quickly */
 	}
 }
 
 void blank_framebuffer()
 {
 	int i, n = scrinfo.xres * scrinfo.yres / varblock.pixels_per_int;
-	for (i = 0; i < n; i++) {
+/*	for (i = 0; i < n; i++) {
 		((int *)vncbuf)[i] = 0;
 		((int *)fbbuf)[i] = 0;
 	}
+*/
+        memset(vncbuf, 0, scrinfo.xres * scrinfo.yres / varblock.pixels_per_int);
+//        memset(fbbuf, 0, scrinfo.xres * scrinfo.yres / varblock.pixels_per_int);
 }
 
 /*****************************************************************************/
@@ -714,9 +772,9 @@ int main(int argc, char **argv)
 					print_usage(argv);
 					exit(0);
 					break;
-				case 'm':
+				case 'c':
 					i++;
-					buffers = atoi(argv[i]);
+					cmp_lines = atoi(argv[i]);
 					break;
 				}
 			}
@@ -730,15 +788,24 @@ int main(int argc, char **argv)
         init_uinput();
 
 	pr_info("Initializing Framebuffer VNC server:\n");
-	pr_info("	width:  %d\n", (int)scrinfo.xres);
-	pr_info("	height: %d\n", (int)scrinfo.yres);
-	pr_info("	bpp:    %d\n", (int)scrinfo.bits_per_pixel);
-	pr_info("	port:   %d\n", (int)VNC_PORT);
+	pr_info("	width:		%d\n", (int)scrinfo.xres);
+	pr_info("	height:		%d\n", (int)scrinfo.yres);
+	pr_info("	bpp:		%d\n", (int)scrinfo.bits_per_pixel);
+	pr_info("	bytespp:	%d\n", (int)varblock.bytespp);
+	pr_info("	pixelpi:	%d\n", (int)varblock.pixels_per_int);
+	pr_info("	port:		%d\n\n", (int)VNC_PORT);
+	pr_info("	hash lines:	%d\n\n", (int)cmp_lines);
+	pr_info("offsets:\n");
+	pr_info("	R:		%d\n", varblock.r_offset);
+	pr_info("	G:		%d\n", varblock.g_offset);
+	pr_info("	B:		%d\n", varblock.b_offset);
+
 	init_fb_server(argc, argv);
 
 	atexit(exit_cleanup);
 	old_sigint_handler = signal(SIGINT, sigint_handler);
 
+        long usec;
 	/* Implement our own event loop to detect changes in the framebuffer. */
 	while (1) {
 		rfbClientPtr client_ptr;
@@ -748,7 +815,7 @@ int main(int argc, char **argv)
 		}
 
 		/* refresh screen every 100 ms */
-		rfbProcessEvents(vncscr, 200 * 500 /* timeout in us */);
+		rfbProcessEvents(vncscr, 300 * 500 /* timeout in us */);
 
 		/* all clients closed */
 		if (!vncscr->clientHead) {
