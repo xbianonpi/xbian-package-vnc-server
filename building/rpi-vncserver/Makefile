@@ -1,6 +1,7 @@
 # Linux Makefile
 
-CFLAGS += -O3 -Wno-psabi -I/opt/vc/include/ -I/opt/vc/include/interface/vcos/pthreads -I/opt/vc/include/interface/vmcs_host/linux -L/opt/vc/lib/
+#CFLAGS += -O4 -march=armv7-a -mfpu=neon  -Wno-psabi -I/opt/vc/include/ -I/opt/vc/include/interface/vcos/pthreads -I/opt/vc/include/interface/vmcs_host/linux -L/opt/vc/lib/
+CFLAGS += -O3 -march=armv6k -mfpu=vfpv3  -Wno-psabi -I/opt/vc/include/ -I/opt/vc/include/interface/vcos/pthreads -I/opt/vc/include/interface/vmcs_host/linux -L/opt/vc/lib/
 
 LOCAL_SRC_FILES := rpi-vncserver.c
 LOCAL_OBJ_FILES := xxhash.o
