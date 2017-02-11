@@ -1,0 +1,2 @@
+config_build_env=schroot -c armhfjessiev6 -p --
+config_source_branch=sourceRPI

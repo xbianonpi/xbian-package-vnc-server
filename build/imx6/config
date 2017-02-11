@@ -1,0 +1,2 @@
+config_build_env=schroot -c armhfjessie -p --
+config_source_branch=sourceIMX
