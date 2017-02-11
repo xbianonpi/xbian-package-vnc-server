@@ -72,7 +72,9 @@
 
 #define VNC_PORT 5900
 
-#define APPNAME "imxvncserver"
+#define APPNAME "rpivncserver"
+
+#define BPP 2
 
 #include <stdio.h>
 #include <openssl/md4.h>
@@ -147,6 +149,7 @@ static void doptr(int buttonMask, int x, int y, rfbClientPtr cl);
 
 
 unsigned long pitch;
+int padded_width;
 DISPMANX_DISPLAY_HANDLE_T   display;
 DISPMANX_RESOURCE_HANDLE_T  resource;
 DISPMANX_MODEINFO_T         info;
@@ -165,12 +168,12 @@ static void init_fb(void)
 	int ret = vc_dispmanx_display_get_info(display, &info);
 	assert(ret == 0);
 
-	varblock.pixels = info.width, info.height;
+	varblock.pixels = info.width * info.height;
 	//### BPP
-	varblock.bytespp = 2;
+	varblock.bytespp = BPP;
 	varblock.pixels_per_int = sizeof(unsigned int) / varblock.bytespp;
 
-	resource = vc_dispmanx_resource_create( type, info.width, info.height, &vc_image_ptr);
+	resource = vc_dispmanx_resource_create(type, info.width, info.height, &vc_image_ptr);
 	pr_info("xres=%d, yres=%d, "
 			"bpp=%d\n", 
 	  (int)info.width, (int)info.height,
@@ -249,9 +252,13 @@ static void init_fb_server(int argc, char **argv)
 
 	pr_info("Initializing server...\n");
 
+	/* DispmanX expects buffer rows to be aligned to a 32 bit boundarys */
+	pitch = ALIGN_UP(BPP * info.width, 32);
+	padded_width = pitch/BPP;
+
 	/* Allocate the VNC server buffer to be managed (not manipulated) by 
 	 * libvncserver. */
-	vncbuf = calloc(info.width * info.height, varblock.bytespp);
+	vncbuf = calloc(padded_width * info.height, varblock.bytespp);
 	assert(vncbuf != NULL);
 
 	/* Allocate the comparison buffer for detecting drawing updates from frame
@@ -260,16 +267,16 @@ static void init_fb_server(int argc, char **argv)
 	assert(fb_hashtable);
 	memset(fb_hashtable, 0x0, info.height / cmp_lines * sizeof(struct hash_t));
 
-	vncscr = rfbGetScreen(&argc, argv, info.width, info.height,
+	vncscr = rfbGetScreen(&argc, argv, padded_width, info.height,
 			5, /* 8 bits per sample */
 			2, /* 2 samples per pixel */
-			2);
+			BPP);
 	assert(vncscr);
 
 	/* Bit shifts */
-	varblock.r_offset = 0;//vncscr->serverFormat.redShift;
-	varblock.g_offset = 5;//vncscr->serverFormat.greenShift;
-	varblock.b_offset = 10;//vncscr->serverFormat.blueShift;
+	varblock.r_offset = 11;
+	varblock.g_offset = 6;
+	varblock.b_offset = 0;
 
 	vncscr->desktopName = APPNAME;
 	vncscr->frameBuffer = vncbuf;
@@ -284,8 +291,7 @@ static void init_fb_server(int argc, char **argv)
 	/* Mark as dirty since we haven't sent any updates at all yet. */
 	rfbMarkRectAsModified(vncscr, 0, 0, info.width, info.height);
 
-	pitch = ALIGN_UP(2 * info.width, 16);
-	image = calloc( 1, pitch * info.height );
+	image = calloc(1, pitch * info.height);
 	assert(image);
 
 }
@@ -594,15 +600,15 @@ static void update_screen(void)
 	/* jump to right virtual screen */
 	for (y = 0; y < (int) info.height; y+=cmp_lines)
 	{
-		f = (unsigned int *)(fbmmap + (y * info.width * varblock.bytespp));
-		c = XXH32((unsigned char *)f, info.width * cmp_lines * varblock.bytespp, 0);
+		f = (unsigned int *)(fbmmap + (y * padded_width * varblock.bytespp));
+		c = XXH32((unsigned char *)f, padded_width * cmp_lines * varblock.bytespp, 0);
 		if (c == fb_hashtable[y/cmp_lines].xxh32)
 			continue;
 
-		r = (unsigned int *)(vncbuf + (y * info.width * varblock.bytespp));
+		r = (unsigned int *)(vncbuf + (y * padded_width * varblock.bytespp));
 		fb_hashtable[y/cmp_lines].xxh32 = c;
 
-		for (x = 0; x < (int) info.width * cmp_lines; x += varblock.pixels_per_int)
+		for (x = 0; x < (int) padded_width * cmp_lines; x += varblock.pixels_per_int)
 		{
 			unsigned int pixel = *f;
 
@@ -623,7 +629,7 @@ static void update_screen(void)
 	if (varblock.min_y != INT_MAX)
 	{
 		varblock.min_x = 0;
-		varblock.max_x = info.width-1;
+		varblock.max_x = padded_width-1;
 	}
 
 	if (varblock.min_x < INT_MAX)
@@ -650,6 +656,7 @@ static void update_screen(void)
 void blank_framebuffer()
 {
 	memset(vncbuf, 0, varblock.bytespp);
+	memset(fb_hashtable, 0x0, info.height / cmp_lines * sizeof(struct hash_t));
 }
 
 /*****************************************************************************/
