@@ -86,7 +86,7 @@ unsigned char *fbmmap = MAP_FAILED;
 //static unsigned short int *vncbuf;
 unsigned char *vncbuf = NULL;
 //static unsigned short int *fbbuf;
-static int cmp_lines = 2;
+static int cmp_lines = 4;
 
 MD4_CTX mdContext;
 struct hash_t {
@@ -716,13 +716,15 @@ static void update_screen(void)
 
 void blank_framebuffer()
 {
+/*
 	int i, n = scrinfo.xres * scrinfo.yres / varblock.pixels_per_int;
-/*	for (i = 0; i < n; i++) {
+	for (i = 0; i < n; i++) {
 		((int *)vncbuf)[i] = 0;
 		((int *)fbbuf)[i] = 0;
 	}
 */
         memset(vncbuf, 0, scrinfo.xres * scrinfo.yres / varblock.pixels_per_int);
+        memset(fb_hashtable, 0x0, scrinfo.yres / cmp_lines * sizeof(struct hash_t));
 //        memset(fbbuf, 0, scrinfo.xres * scrinfo.yres / varblock.pixels_per_int);
 }
 
