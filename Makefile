@@ -1,8 +1,5 @@
 # Linux Makefile
 
-#CFLAGS += -O4 -march=armv7-a -mfpu=neon  -Wno-psabi -I/opt/vc/include/ -I/opt/vc/include/interface/vcos/pthreads -I/opt/vc/include/interface/vmcs_host/linux -L/opt/vc/lib/
-CFLAGS += -O3 -march=armv6k -mfpu=vfpv3  -Wno-psabi -I/opt/vc/include/ -I/opt/vc/include/interface/vcos/pthreads -I/opt/vc/include/interface/vmcs_host/linux -L/opt/vc/lib/
-
 LOCAL_SRC_FILES := rpi-vncserver.c
 LOCAL_OBJ_FILES := xxhash.o
 
@@ -10,7 +7,7 @@ LOCAL_SHARED_LIBRARIES := -lz -lpthread -ljpeg -lvncserver -lopenmaxil -lbcm_hos
 
 LOCAL_MODULE := rpi-vncserver
 
-PKG_DIR := ../../content
+PKG_DIR := ../../../content
 PKG_PREFIX := /usr/local/sbin
 
 # build 
@@ -18,14 +15,17 @@ PKG_PREFIX := /usr/local/sbin
 GCC := $(CROSS_COMPILE)gcc
 LD := $(CROSS_COMPILE)gcc
 
-all: $(LOCAL_OBJ_FILES) $(LOCAL_MODULE) clean
+all: $(LOCAL_OBJ_FILES) $(LOCAL_MODULE)
 
 $(LOCAL_MODULE): $(LOCAL_OBJ_FILES)
 	$(GCC) $(CFLAGS) $(LOCAL_SRC_FILES) $(LOCAL_OBJ_FILES) -g $(LOCAL_SHARED_LIBRARIES) -o $@
-	mv -v $(LOCAL_MODULE) ../../content/usr/local/sbin/
 
 $(LOCAL_OBJ_FILES):
 	$(GCC) -c $(CFLAGS) -fpic $(LOCAL_SHARED_LIBRARIES) $(patsubst %.o,%.c,$@)
 
 clean:
 	rm -rf $(LOCAL_MODULE)
+
+install:
+	mkdir -p $(PKG_DIR)$(PKG_PREFIX)
+	install -p -m 755 $(LOCAL_MODULE) $(PKG_DIR)$(PKG_PREFIX)
