@@ -3,9 +3,9 @@
 LOCAL_SRC_FILES := vncserver.c
 LOCAL_OBJ_FILES := xxhash.o
 
-LOCAL_SHARED_LIBRARIES := -lz -lpthread -ljpeg -lvncserver -lopenmaxil -lbcm_host
+LOCAL_SHARED_LIBRARIES := -lz -lpthread -ljpeg -lvncserver -lcrypto -lssl
 
-LOCAL_MODULE := rpi-vncserver
+LOCAL_MODULE := imx-vncserver
 
 PKG_DIR := ../../../content
 PKG_PREFIX := /usr/local/sbin
@@ -18,7 +18,7 @@ LD := $(CROSS_COMPILE)gcc
 all: $(LOCAL_OBJ_FILES) $(LOCAL_MODULE)
 
 $(LOCAL_MODULE): $(LOCAL_OBJ_FILES)
-	$(GCC) $(CFLAGS) $(LOCAL_SRC_FILES) $(LOCAL_OBJ_FILES) -g $(LOCAL_SHARED_LIBRARIES) -o $@
+	$(GCC) $(CFLAGS) -D IMX $(LOCAL_SRC_FILES) $(LOCAL_OBJ_FILES) $(LOCAL_SHARED_LIBRARIES) -o $@
 
 $(LOCAL_OBJ_FILES):
 	$(GCC) -c $(CFLAGS) -fpic $(LOCAL_SHARED_LIBRARIES) $(patsubst %.o,%.c,$@)
