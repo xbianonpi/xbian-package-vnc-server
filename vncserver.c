@@ -28,9 +28,17 @@
  * NOTE: depends libvncserver.
  */
 
+#define VERSION "2.2.3"
+
+#ifndef IMX
+#define RPI
+#endif
+
 /* define the following to enable debug messages */
 #define DEBUG
+#ifdef DEBUG
 #define DEBUG_VERBOSE
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,7 +67,9 @@
 #include "rfb/keysym.h"
 #include "rfb/rfbregion.h"
 
+#ifdef RPI
 #include "bcm_host.h"
+#endif
 
 /* framebuffer */
 #define FB_DEVICE "/dev/fb0"
@@ -72,7 +82,12 @@
 
 #define VNC_PORT 5900
 
-#define APPNAME "rpivncserver"
+#ifdef IMX
+#define APPNAME "imx-vncserver"
+#endif
+#ifdef RPI
+#define APPNAME "rpi-vncserver"
+#endif
 
 #define BPP 2
 
@@ -80,6 +95,8 @@
 #include <openssl/md4.h>
 
 #include "xxhash.h"
+
+static int debug = 0;
 
 static int kbdfd = -1;
 static int touchfd = -1;
@@ -127,16 +144,18 @@ static struct varblock_t {
 static void keyevent(rfbBool down, rfbKeySym key, rfbClientPtr cl);
 static void doptr(int buttonMask, int x, int y, rfbClientPtr cl);
 
+static int update_screen(void);
+
 #ifdef DEBUG
 # define pr_debug(fmt, ...) \
-	 fprintf(stderr, fmt, ## __VA_ARGS__)
+	if (debug) fprintf(stderr, fmt, ## __VA_ARGS__)
 #else
 # define pr_debug(fmt, ...) do { } while(0)
 #endif
 
 #ifdef DEBUG_VERBOSE
 # define pr_vdebug(fmt, ...) \
-	 pr_debug(fmt, ## __VA_ARGS__)
+	if (debug) pr_debug(fmt, ## __VA_ARGS__)
 #else
 # define pr_vdebug(fmt, ...) do { } while(0)
 #endif
@@ -148,47 +167,140 @@ static void doptr(int buttonMask, int x, int y, rfbClientPtr cl);
 	fprintf(stderr, fmt, ## __VA_ARGS__)
 
 
+#ifdef IMX
+static struct fb_var_screeninfo scrinfo;
+static int fbfd = -1;
+#endif
+
+#ifdef RPI
 unsigned long pitch;
-int padded_width;
 DISPMANX_DISPLAY_HANDLE_T   display;
 DISPMANX_RESOURCE_HANDLE_T  resource;
-DISPMANX_MODEINFO_T         info;
+DISPMANX_MODEINFO_T         scrinfo;
 void                       *image;
 VC_IMAGE_TYPE_T type = VC_IMAGE_RGB565;
 VC_IMAGE_TRANSFORM_T		transform = 0;
 VC_RECT_T			rect;
+#endif
+
+int padded_width;
+int screen_width;
+int screen_height;
 
 static void init_fb(void)
 {
+#ifdef RPI
 	uint32_t	screen = 0;
 	uint32_t	vc_image_ptr;
 
 	bcm_host_init();
 	display = vc_dispmanx_display_open(screen);
-	int ret = vc_dispmanx_display_get_info(display, &info);
+	int ret = vc_dispmanx_display_get_info(display, &scrinfo);
 	assert(ret == 0);
 
-	varblock.pixels = info.width * info.height;
-	//### BPP
-	varblock.bytespp = BPP;
-	varblock.pixels_per_int = sizeof(unsigned int) / varblock.bytespp;
+	screen_width = scrinfo.width;
+	screen_height = scrinfo.height;
 
-	resource = vc_dispmanx_resource_create(type, info.width, info.height, &vc_image_ptr);
-	pr_info("xres=%d, yres=%d, "
-			"bpp=%d\n", 
-	  (int)info.width, (int)info.height,
+	/* DispmanX expects buffer rows to be aligned to a 32 bit boundarys */
+	pitch = ALIGN_UP(BPP * screen_width, 32);
+	padded_width = pitch/BPP;
+
+	varblock.pixels = screen_width * screen_height;
+	varblock.bytespp = BPP;
+
+	resource = vc_dispmanx_resource_create(type, screen_width, screen_height, &vc_image_ptr);
+	pr_debug("init_fb(): xres=%d, yres=%d, "
+			"bpp=%d\n",
+	  screen_width, screen_height,
 	  (int)varblock.bytespp * 8);
+	/* Bit shifts */
+	varblock.r_offset = 11;
+	varblock.g_offset = 6;
+	varblock.b_offset = 0;
+#endif
+#ifdef IMX
+        struct fb_fix_screeninfo finfo;
+        unsigned long page_mask, fb_mem_offset;
+
+	if ((fbfd = open(FB_DEVICE, O_RDONLY)) == -1) {
+		perror("open");
+		exit(EXIT_FAILURE);
+	}
+
+	if (ioctl(fbfd, FBIOGET_VSCREENINFO, &scrinfo) != 0) {
+		perror("ioctl");
+		exit(EXIT_FAILURE);
+	}
+        if (ioctl(fbfd, FBIOGET_FSCREENINFO, &finfo) != 0) {
+                perror("ioctl FBIOGET_FSCREENINFO");
+                exit(EXIT_FAILURE);
+        }
+
+	screen_width = padded_width = scrinfo.xres;
+	screen_height = scrinfo.yres;
+
+	varblock.pixels = screen_width * screen_height;
+	varblock.bytespp = scrinfo.bits_per_pixel / 8;
+
+	pr_debug("init_fb():xres=%d, yres=%d, "
+			"xresv=%d, yresv=%d, "
+			"xoffs=%d, yoffs=%d, "
+			"bpp=%d\n",
+	  screen_width, screen_height,
+	  (int)scrinfo.xres_virtual, (int)scrinfo.yres_virtual,
+	  (int)scrinfo.xoffset, (int)scrinfo.yoffset,
+	  (int)scrinfo.bits_per_pixel);
+
+        page_mask = (unsigned long)getpagesize()-1;
+        fb_mem_offset = (unsigned long)(finfo.smem_start) & page_mask;
+
+	fbmmap = mmap(NULL, (scrinfo.yres_virtual/screen_height) * varblock.pixels * varblock.bytespp/*finfo.smem_len+fb_mem_offset*/,
+			PROT_READ, MAP_SHARED | MAP_NORESERVE, fbfd, 0);
+
+	if (fbmmap == MAP_FAILED) {
+		perror("mmap");
+		exit(EXIT_FAILURE);
+	}
+	pr_debug("fbmmap addr %lx\n", (long)fbmmap);
+
+	/* Bit shifts */
+	varblock.r_offset = scrinfo.red.offset + scrinfo.red.length - 5;
+	varblock.g_offset = scrinfo.green.offset + scrinfo.green.length - 5;
+	varblock.b_offset = scrinfo.blue.offset + scrinfo.blue.length - 5;
+#endif
+	varblock.pixels_per_int = sizeof(unsigned int) / varblock.bytespp;
 }
+
+
+static void deinit_fb(void)
+{
+#ifdef RPI
+	update_screen();
+	vc_dispmanx_resource_delete(resource);
+	vc_dispmanx_display_close(display);
+	bcm_host_deinit();
+	pr_debug("deinit_fb()\n");
+#endif
+#ifdef IMX
+        if (fbmmap) {
+		munmap(fbmmap, (scrinfo.yres_virtual/screen_height) * varblock.pixels * varblock.bytespp);
+	}
+	if (fbfd != -1) {
+		close(fbfd);
+	}
+#endif
+}
+
 
 static void init_uinput()
 {
 	struct uinput_user_dev	uinp;
 	int retcode, i;
 
-	kbdfd = open("/dev/uinput", O_WRONLY | O_NDELAY );     
-	printf("open /dev/uinput returned %d.\n", kbdfd);      
-	if (kbdfd == 0) {                                      
-		printf("Could not open uinput.\n");            
+	kbdfd = open("/dev/uinput", O_WRONLY | O_NDELAY );
+	pr_debug("open /dev/uinput returned %d.\n", kbdfd);
+	if (kbdfd == 0) {
+		pr_err("Could not open uinput.\n");
 		exit(-1);
 	}
 
@@ -199,9 +311,9 @@ static void init_uinput()
 
 	if (!relative_mode) {
 		uinp.absmin[ABS_X] = 0;
-		uinp.absmax[ABS_X] = info.width;
+		uinp.absmax[ABS_X] = screen_width;
 		uinp.absmin[ABS_Y] = 0;
-		uinp.absmax[ABS_Y] = info.height;
+		uinp.absmax[ABS_Y] = screen_height;
 	}
 
 	ioctl(kbdfd, UI_SET_EVBIT, EV_KEY);
@@ -226,20 +338,19 @@ static void init_uinput()
 	}
 
 	retcode = write(kbdfd, &uinp, sizeof(uinp));
-	printf("First write returned %d.\n", retcode);
+	pr_debug("First write returned %d.\n", retcode);
 
 	retcode = (ioctl(kbdfd, UI_DEV_CREATE));
-	printf("ioctl UI_DEV_CREATE returned %d.\n", retcode);
+	pr_debug("ioctl UI_DEV_CREATE returned %d.\n", retcode);
 	if (retcode) {
-		printf("Error create uinput device %d.\n", retcode);
+		pr_err("Error create uinput device %d.\n", retcode);
 		exit(-1);
 	}
 }
 
 static void cleanup_kbd()
 {
-	if(kbdfd != -1)
-	{
+	if (kbdfd != -1)	{
 		ioctl(kbdfd, UI_DEV_DESTROY);
 		close(kbdfd);
 	}
@@ -249,34 +360,31 @@ static void cleanup_kbd()
 
 static void init_fb_server(int argc, char **argv)
 {
+	pr_info("Initializing server (%d, %d, %d)\n", padded_width, screen_height, varblock.bytespp);
 
-	pr_info("Initializing server...\n");
-
-	/* DispmanX expects buffer rows to be aligned to a 32 bit boundarys */
-	pitch = ALIGN_UP(BPP * info.width, 32);
-	padded_width = pitch/BPP;
+	if (!debug) {
+		rfbLogEnable(0);
+	}
 
 	/* Allocate the VNC server buffer to be managed (not manipulated) by 
 	 * libvncserver. */
-	vncbuf = calloc(padded_width * info.height, varblock.bytespp);
-	assert(vncbuf != NULL);
+	vncbuf = calloc(padded_width * screen_height, varblock.bytespp);
+	assert(vncbuf);
 
 	/* Allocate the comparison buffer for detecting drawing updates from frame
 	 * to frame. */
-	fb_hashtable = calloc(info.height / cmp_lines, sizeof(struct hash_t));
+	fb_hashtable = calloc(screen_height / cmp_lines, sizeof(struct hash_t));
 	assert(fb_hashtable);
-	memset(fb_hashtable, 0x0, info.height / cmp_lines * sizeof(struct hash_t));
-
-	vncscr = rfbGetScreen(&argc, argv, padded_width, info.height,
+	memset(fb_hashtable, 0x0, screen_height / cmp_lines * sizeof(struct hash_t));
+#ifdef RPI
+	fbmmap = calloc(1, pitch * screen_height);
+	assert(fbmmap);
+#endif
+	vncscr = rfbGetScreen(&argc, argv, padded_width, screen_height,
 			5, /* 8 bits per sample */
 			2, /* 2 samples per pixel */
-			BPP);
+			varblock.bytespp);
 	assert(vncscr);
-
-	/* Bit shifts */
-	varblock.r_offset = 11;
-	varblock.g_offset = 6;
-	varblock.b_offset = 0;
 
 	vncscr->desktopName = APPNAME;
 	vncscr->frameBuffer = vncbuf;
@@ -289,14 +397,11 @@ static void init_fb_server(int argc, char **argv)
 
 	rfbInitServer(vncscr);
 	/* Mark as dirty since we haven't sent any updates at all yet. */
-	rfbMarkRectAsModified(vncscr, 0, 0, info.width, info.height);
-
-	image = calloc(1, pitch * info.height);
-	assert(image);
-
+	rfbMarkRectAsModified(vncscr, 0, 0, screen_width, screen_height);
 }
 
 /*****************************************************************************/
+#if 0
 void injectKeyEvent(uint16_t code, uint16_t value)
 {
 	struct input_event ev;
@@ -312,6 +417,7 @@ void injectKeyEvent(uint16_t code, uint16_t value)
 
 	pr_vdebug("injectKey (%d, %d)\n", code , value);
 }
+#endif
 
 /* device independent */
 static int keysym2scancode(rfbKeySym key)
@@ -417,40 +523,22 @@ static int keysym2scancode(rfbKeySym key)
 
 static void keyevent(rfbBool down, rfbKeySym key, rfbClientPtr cl)
 {
-        struct input_event       event;
+	struct input_event event;
 
-        if(down) {
+	memset(&event, 0, sizeof(event));
+	gettimeofday(&event.time, NULL);
+	event.type = EV_KEY;
+	event.code = keysym2scancode(key); //nomodifiers!
+	event.value = down ? 1: 0 ; //key pressed/released
+	write(kbdfd, &event, sizeof(event));
+	pr_debug("key event %04x down\n", event.code);
 
-                memset(&event, 0, sizeof(event));
-                gettimeofday(&event.time, NULL);
-                event.type = EV_KEY;
-                event.code = keysym2scancode(key); //nomodifiers!
-                event.value = 1; //key pressed
-                write(kbdfd, &event, sizeof(event));
-
-                memset(&event, 0, sizeof(event));
-                gettimeofday(&event.time, NULL);
-                event.type = EV_SYN;
-                event.code = SYN_REPORT; //not sure what this is for? i'm guessing its some kind of sync thing?
-                event.value = 0;
-                write(kbdfd, &event, sizeof(event));
-
-        } else {
-                memset(&event, 0, sizeof(event));
-                gettimeofday(&event.time, NULL);
-                event.type = EV_KEY;
-                event.code = keysym2scancode(key); //nomodifiers!
-                event.value = 0; //key realeased
-                write(kbdfd, &event, sizeof(event));
-
-                memset(&event, 0, sizeof(event));
-                gettimeofday(&event.time, NULL);
-                event.type = EV_SYN;
-                event.code = SYN_REPORT; //not sure what this is for? i'm guessing its some kind of sync thing?
-                event.value = 0;
-                write(kbdfd, &event, sizeof(event));
-
-        }
+	memset(&event, 0, sizeof(event));
+	gettimeofday(&event.time, NULL);
+	event.type = EV_SYN;
+	event.code = SYN_REPORT; //not sure what this is for? i'm guessing its some kind of sync thing?
+	event.value = 0;
+	write(kbdfd, &event, sizeof(event));
 }
 
 static void doptr(int buttonMask, int x, int y, rfbClientPtr cl)
@@ -557,6 +645,7 @@ static void doptr(int buttonMask, int x, int y, rfbClientPtr cl)
         }
 }
 
+#if 0
 static void ptrevent(int buttonMask, int x, int y, rfbClientPtr cl)
 {
 	/* Indicates either pointer movement or a pointer button press or release. The pointer is
@@ -575,30 +664,31 @@ a press and release of button 5.
 		injectTouchEvent(0, x, y);
 	}
 }
+#endif
 
 #define PIXEL_FB_TO_RFB(p,r,g,b) \
 	((p >> r) & 0x1f001f) | \
 	(((p >> g) & 0x1f001f) << 5) | \
 	(((p >> b) & 0x1f001f) << 10)
 
-static void update_screen(void)
+static int update_screen(void)
 {
 	unsigned int *f;
 	uint32_t c;
 	unsigned int *r;
 	int x, y;
 
+#ifdef RPI
 	vc_dispmanx_snapshot(display, resource, transform);
-	vc_dispmanx_rect_set(&rect, 0, 0, info.width, info.height);
-	vc_dispmanx_resource_read_data(resource, &rect, image, pitch);
-
-	unsigned char *fbmmap = (unsigned char *)image;
+	vc_dispmanx_rect_set(&rect, 0, 0, screen_width, screen_height);
+	vc_dispmanx_resource_read_data(resource, &rect, fbmmap, pitch);
+#endif
 
 	varblock.min_x = varblock.min_y = INT_MAX;
 	varblock.max_x = varblock.max_y = -1;
 
 	/* jump to right virtual screen */
-	for (y = 0; y < (int) info.height; y+=cmp_lines)
+	for (y = 0; y < (int) screen_height; y+=cmp_lines)
 	{
 		f = (unsigned int *)(fbmmap + (y * padded_width * varblock.bytespp));
 		c = XXH32((unsigned char *)f, padded_width * cmp_lines * varblock.bytespp, 0);
@@ -648,32 +738,52 @@ static void update_screen(void)
 		rfbMarkRectAsModified(vncscr, varblock.min_x, varblock.min_y,
 		  varblock.max_x, varblock.max_y);
 
-		rfbProcessEvents(vncscr, 500); /* update quickly */
+		rfbProcessEvents(vncscr, 100 /* 500 */); /* update quickly */
+		return TRUE;
 	}
+	return FALSE;
 
 }
 
 void blank_framebuffer()
 {
-	memset(vncbuf, 0, varblock.bytespp);
-	memset(fb_hashtable, 0x0, info.height / cmp_lines * sizeof(struct hash_t));
+	memset(vncbuf, 0, screen_width * screen_height / varblock.pixels_per_int);
+	memset(fb_hashtable, 0x0, screen_height / cmp_lines * sizeof(struct hash_t));
 }
 
 /*****************************************************************************/
 
 void print_usage(char **argv)
 {
+/*
 	pr_info("%s [-k device] [-t device] [-h]\n"
 		"-m number: FB multibuffer count\n",
 		"-h : print this help\n",
 		APPNAME);
+*/
+	pr_info("%s version %s\nusage:\n  %s [-c lines] %s[-h]\n",
+		APPNAME, VERSION, APPNAME,
+#ifdef DEBUG
+		"[-d] "
+#else
+		""
+#endif
+		);
+	pr_info("    -c : comparing lines\n");
+	pr_info("    -d : debug output\n");
+	pr_info("    -h : print this help\n");
 }
 
 void exit_cleanup(void)
 {
-	if (image)
-		free(image);
+#ifdef RPI
+	if (fbmmap)
+		free(fbmmap);
+#endif
 	pr_info("Cleaning up...\n");
+#ifdef IMX
+	deinit_fb();
+#endif
 	cleanup_kbd();
 }
 
@@ -693,40 +803,40 @@ void sigint_handler(int arg)
 
 int main(int argc, char **argv)
 {
-	if(argc > 1)
-	{
-		int i=1;
-		while(i < argc)
-		{
-			if(*argv[i] == '-')
-			{
-				switch(*(argv[i] + 1))
-				{
-				case 'h':
-					print_usage(argv);
-					exit(0);
-					break;
-				case 'c':
-					i++;
-					cmp_lines = atoi(argv[i]);
-					break;
+	if (argc > 1) {
+		int i = 1;
+		while (i < argc) {
+			if(*argv[i] == '-') {
+				switch(*(argv[i] + 1)) 	{
+					case 'h':
+						print_usage(argv);
+						exit(0);
+						break;
+					case 'c':
+						i++;
+						cmp_lines = atoi(argv[i]);
+						break;
+					case 'd':
+						debug = 1;
+						break;
 				}
 			}
 			i++;
 		}
 	}
 
+	pr_info("%s version %s\n\n", APPNAME, VERSION);
 	pr_info("Initializing framebuffer device " FB_DEVICE "...\n");
 	init_fb();
 	init_uinput();
 	init_fb_server(argc, argv);
 
 	pr_info("Initializing Framebuffer VNC server:\n");
-	pr_info("	width:		%d\n", (int)info.width);
-	pr_info("	height:		%d\n", (int)info.height);
+	pr_info("	width:		%d\n", (int)screen_width);
+	pr_info("	height:		%d\n", (int)screen_height);
 	pr_info("	bpp:		%d\n", (int)16);
 	pr_info("	bytespp:	%d\n", (int)varblock.bytespp);
-	pr_info("	pixelpi:	%d\n", (int)varblock.pixels_per_int);
+	pr_info("	pixelperint:	%d\n", (int)varblock.pixels_per_int);
 	pr_info("	port:		%d\n\n", (int)VNC_PORT);
 	pr_info("	hash lines:	%d\n\n", (int)cmp_lines);
 	pr_info("offsets:\n");
@@ -737,30 +847,44 @@ int main(int argc, char **argv)
 	atexit(exit_cleanup);
 	old_sigint_handler = signal(SIGINT, sigint_handler);
 
-	long usec;
+	pr_info("\nsuccessfully started\n");
+
 	/* Implement our own event loop to detect changes in the framebuffer. */
 	while (1) {
 		rfbClientPtr client_ptr;
-		while (!vncscr->clientHead) {
+		if (!vncscr->clientHead) {
+#ifdef RPI
+			deinit_fb();
+#endif
 			/* sleep until getting a client */
-			rfbProcessEvents(vncscr, LONG_MAX);
+			while (!vncscr->clientHead) {
+				rfbProcessEvents(vncscr, LONG_MAX);
+			}
+#ifdef RPI
+			init_fb();
+#endif
+			blank_framebuffer(vncbuf);
+			/* Send KEY_LEFTSHIFT to wakeup screen if necessary */
+			keyevent(TRUE, 0xFFE1, NULL);
+			keyevent(FALSE, 0xFFE1, NULL);
 		}
 
-		/* refresh screen every 100 ms */
-		rfbProcessEvents(vncscr, 300 * 500 /* timeout in us */);
+		/* refresh screen every 150 ms */
+		//rfbProcessEvents(vncscr, 300 * 500 /* timeout in us */);
 
 		/* all clients closed */
-		if (!vncscr->clientHead) {
-			blank_framebuffer(vncbuf);
-		}
+		//if (!vncscr->clientHead) {
+		//	blank_framebuffer(vncbuf);
+		//}
 
 		/* scan screen if at least one client has requested */
-		for (client_ptr = vncscr->clientHead; client_ptr; client_ptr = client_ptr->next)
-		{
+		for (client_ptr = vncscr->clientHead; client_ptr; client_ptr = client_ptr->next) {
 			if (!sraRgnEmpty(client_ptr->requestedRegion)) {
-				update_screen();
-				break;
+				if (update_screen())
+					break;
 			}
+			/* refresh screen every 150 ms */
+			rfbProcessEvents(vncscr, 300 * 500 /* timeout in us */);
 		}
 	}
 
