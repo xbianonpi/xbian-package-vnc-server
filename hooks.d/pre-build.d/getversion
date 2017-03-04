@@ -1,0 +1,10 @@
+
+if [ -e vncserver.c ]; then
+    VERFILE=vncserver.c
+    VERSION="$(grep "define VERSION" $VERFILE | awk '{print $3}'|tr -d '"; ')"
+else
+    VERSION="0.00.0"
+fi
+
+sed -i "s%config_deb_version=.*%config_deb_version=$VERSION%g"  ../config_pkgver
+

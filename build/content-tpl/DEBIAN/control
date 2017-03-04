@@ -1,6 +1,6 @@
 Origin: XBian
 Package: __PKGNAME__
-Version: 2.2.1
+Version: __VERSION__
 Essential: No
 Priority: optional
 Section: net
