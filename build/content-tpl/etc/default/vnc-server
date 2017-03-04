@@ -1,0 +1,6 @@
+#
+# Options to give as additional parameters to vnc-server
+# Please run imx|rpi-vncserver -h [rfb] to see which options
+# can be used here
+#
+OPTIONS="-listen $(hostname) -listenv6 $(hostname)"
