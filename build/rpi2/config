@@ -1,2 +1,1 @@
-config_build_env=schroot -c armhfjessie -p --
-config_source_branch=sourceRPI
+config_build_env=schroot -c armhf${config_os_version} -p --
