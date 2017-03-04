@@ -1,2 +1,3 @@
 etc/init/vnc-server.override
 etc/default/vnc-autores
+etc/default/vnc-server
