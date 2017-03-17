@@ -1,0 +1,11 @@
+
+case $config_os_version in
+
+    jessie) 
+        ;;
+
+    *) sed -i "s/libvncserver0/libvncserver1/g" DEBIAN/control
+        ;;
+
+esac
+
