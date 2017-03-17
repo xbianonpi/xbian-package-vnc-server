@@ -5,6 +5,6 @@ Essential: No
 Priority: optional
 Section: net
 Architecture: armhf
-Depends: xbian-package-firmware | firmware-imx, libc6, libvncserver0 | libvncserver1, zlib1g, libgcc1, libgpg-error0, libp11-kit-dev, libjpeg62
+Depends: xbian-package-firmware | firmware-imx, libc6, libvncserver0, zlib1g, libgcc1, libgpg-error0, libjpeg62
 Maintainer: mk01 <development@xbian.org>
 Description: VNC Server (__ARCHBRANCH__)
