@@ -8,54 +8,102 @@ from resources.lib.xbmcguie.category import Setting
 import resources.lib.translation
 _ = resources.lib.translation.language.ugettext
 
-class vncServer(Setting) :
-    CONTROL = CategoryLabelControl(Tag('label','Vnc Serveur'))
+class vncServer(Setting):
+    CONTROL = CategoryLabelControl(Tag('label','VNC Server'))
 
-class changeresolution(Setting) :
-    CONTROL = RadioButtonControl(Tag('label','Switch resolution when vnc start'))
-    DIALOGHEADER = _('Vnc Server')
-                    
+class enablePassword(Setting):
+    CONTROL = RadioButtonControl(Tag('label',_('Enable VNC password')))
+    DIALOGHEADER = _('VNC password')
+
+    def onInit(self):
+        self.cfgfile = '/etc/default/vnc-server'
+        self.setting = 'USEPASS'
+        self.exist = False
+
+    def getUserValue(self):
+        return str(self.getControlValue())
+
+    def setControlValue(self,value):
+        if value == '1':
+            value = True
+        else:
+            value = False
+        self.control.setValue(value)
+
+    def getXbianValue(self):
+        with open(self.cfgfile,'r') as f:
+            mat = filter(lambda x: re.match('%s=.*'%self.setting,x),f.readlines())
+        if mat:
+            self.exist = True
+            return re.search('[01]',mat[0]).group()[0]
+        return 0
+
+    def setXbianValue(self,value):
+        if self.exist and value in ('0','1'):
+            #replace
+            def replace(x):
+                if re.match('%s=.*'%self.setting,x):
+                    return re.sub('[01]',value,x,1)
+                else:
+                    return x
+            with open(self.cfgfile, "r") as f:
+                data = map(replace,open(self.cfgfile,'r').readlines())
+            with open(self.cfgfile, "w") as f:
+                f.writelines(data)
+        elif value in ('0','1'):
+            with open(self.cfgfile, "a") as f:
+                f.write('%s=%s\n'%(self.setting,value))
+        else:
+            return False
+        self.DIALOGHEADER = _('VNC server')
+        self.OKTEXT = _('Please restart %s') % (self.DIALOGHEADER)
+        return True
+
+class changeResolution(Setting):
+    CONTROL = RadioButtonControl(Tag('label',_('Switch resolution when %s starts') % _('VNC server')))
+    DIALOGHEADER = _('VNC server')
+
     def onInit(self):
         self.cfgfile = '/etc/default/vnc-autores'
         self.setting = 'AUTOMODE'
         self.exist = False
-        
+
     def getUserValue(self):
         return str(self.getControlValue())
-    
-    def setControlValue(self,value) :
-        if value == '1' :
+
+    def setControlValue(self,value):
+        if value == '1':
             value = True
-        else :
+        else:
             value = False
         self.control.setValue(value)
-    
-    def getXbianValue(self):   
-        with open(self.cfgfile,'r') as f :             
-            mat = filter(lambda x : re.match('%s=.*'%self.setting,x),f.readlines())            
-        if mat :            
-            self.exist = True            
+
+    def getXbianValue(self):
+        with open(self.cfgfile,'r') as f:
+            mat = filter(lambda x: re.match('%s=.*'%self.setting,x),f.readlines())
+        if mat:
+            self.exist = True
             return re.search('[01]',mat[0]).group()[0]
         return 0
-        
-    def setXbianValue(self,value):      
+
+    def setXbianValue(self,value):
         if self.exist and value in ('0','1'):
             #replace
-            def replace(x) :
+            def replace(x):
                 print x
-                if re.match('%s=.*'%self.setting,x) :                    
+                if re.match('%s=.*'%self.setting,x):
                     return re.sub('[01]',value,x,1)
-                else :
+                else:
                     return x
-            with open(self.cfgfile, "r") as f:                
+            with open(self.cfgfile, "r") as f:
                 data = map(replace,open(self.cfgfile,'r').readlines())
-            with open(self.cfgfile, "w") as f:                
-                f.writelines(data) 
+            with open(self.cfgfile, "w") as f:
+                f.writelines(data)
         elif value in ('0','1'):
             with open(self.cfgfile, "a") as f:
-                f.write('%s=%s\n'%(self.setting,value))                
-        else :
+                f.write('%s=%s\n'%(self.setting,value))
+        else:
             return False
         return True
-                
-settings = [vncServer,changeresolution]
+
+settings = [vncServer, enablePassword, changeResolution]

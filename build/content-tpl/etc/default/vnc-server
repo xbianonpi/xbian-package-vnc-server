@@ -1,6 +1,12 @@
 #
-# Options to give as additional parameters to vnc-server
-# Please run imx|rpi-vncserver -h [rfb] to see which options
-# can be used here
+# No password is required to access desktop per default. If you want to enable
+# password, please set USEPASS to 1. This can be done by Kodi's xbian-config GUI,
+# category Extra. Password is usually the same as with user xbian.
+#
+USEPASS=0
+
+#
+# Options to give as additional parameters to vnc-server. Please run
+# imx|rpi-vncserver -h [rfb] to see which options can be used here.
 #
 OPTIONS=""
