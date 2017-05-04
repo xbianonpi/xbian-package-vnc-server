@@ -1,14 +1,17 @@
 #!/bin/bash
 
-
 if [ $1 == "configure" ]; then
 
     chmod 664 /etc/default/vnc-autores
+    chgrp xbian /etc/default/vnc-autores
+    chmod 664 /etc/default/vnc-server
+    chgrp xbian /etc/default/vnc-server
 
     grep -q ^uinput$ /etc/modules || echo uinput >> /etc/modules
 
-    reload -q vnc-server 2>/dev/null|| :
+    chown -R xbian:xbian /home/xbian/.vnc
 
+    reload -q vnc-server 2>/dev/null || :
 fi
 
 exit 0
