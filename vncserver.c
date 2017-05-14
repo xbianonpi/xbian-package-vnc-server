@@ -28,7 +28,7 @@
  * NOTE: depends libvncserver.
  */
 
-#define VERSION "2.4.1"
+#define VERSION "2.4.2"
 
 #ifndef IMX
 #define RPI
