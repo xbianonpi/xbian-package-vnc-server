@@ -28,7 +28,7 @@
  * NOTE: depends libvncserver.
  */
 
-#define VERSION "2.4.2"
+#define VERSION "2.4.3"
 
 #ifndef IMX
 #define RPI
@@ -176,6 +176,7 @@ static void doptr(int buttonMask, int x, int y, rfbClientPtr cl);
 
 #ifdef IMX
 static struct fb_var_screeninfo scrinfo;
+static struct fb_var_screeninfo scrinfo_now;
 static int fbfd = -1;
 #endif
 
@@ -237,60 +238,77 @@ static int init_fb(void)
 		varblock.r_offset = 11;
 		varblock.g_offset = 6;
 		varblock.b_offset = 0;
+
+		varblock.pixels_per_int = sizeof(unsigned int) / varblock.bytespp;
 	}
 #endif
 #ifdef IMX
         struct fb_fix_screeninfo finfo;
         unsigned long page_mask, fb_mem_offset;
 
-	if ((fbfd = open(FB_DEVICE, O_RDONLY)) == -1) {
-		perror("open");
-		exit(EXIT_FAILURE);
+        if (fbfd < 0) {
+		if ((fbfd = open(FB_DEVICE, O_RDONLY)) == -1) {
+			perror("open");
+			exit(EXIT_FAILURE);
+		}
+
+		if (ioctl(fbfd, FBIOGET_VSCREENINFO, &scrinfo) != 0) {
+			perror("ioctl");
+			exit(EXIT_FAILURE);
+		}
+		if (ioctl(fbfd, FBIOGET_FSCREENINFO, &finfo) != 0) {
+			perror("ioctl FBIOGET_FSCREENINFO");
+			exit(EXIT_FAILURE);
+		}
+
+		if (screen_width != scrinfo.xres || screen_height != screen_height) {
+			resulution_changed = 1;
+		}
+
+		screen_width = padded_width = scrinfo.xres;
+		screen_height = scrinfo.yres;
+
+		varblock.pixels = screen_width * screen_height;
+		varblock.bytespp = scrinfo.bits_per_pixel / 8;
+
+		pr_debug("init_fb():xres=%d, yres=%d, "
+				"xresv=%d, yresv=%d, "
+				"xoffs=%d, yoffs=%d, "
+				"bpp=%d\n",
+		  screen_width, screen_height,
+		  (int)scrinfo.xres_virtual, (int)scrinfo.yres_virtual,
+		  (int)scrinfo.xoffset, (int)scrinfo.yoffset,
+		  (int)scrinfo.bits_per_pixel);
+
+		page_mask = (unsigned long)getpagesize()-1;
+		fb_mem_offset = (unsigned long)(finfo.smem_start) & page_mask;
+
+		fbmmap = mmap(NULL, (scrinfo.yres_virtual/screen_height) * varblock.pixels * varblock.bytespp/*finfo.smem_len+fb_mem_offset*/,
+				PROT_READ, MAP_SHARED | MAP_NORESERVE, fbfd, 0);
+
+		if (fbmmap == MAP_FAILED) {
+			perror("mmap");
+			exit(EXIT_FAILURE);
+		}
+		pr_debug("fbmmap addr %lx\n", (long)fbmmap);
+
+		/* Bit shifts */
+		varblock.r_offset = scrinfo.red.offset + scrinfo.red.length - 5;
+		varblock.g_offset = scrinfo.green.offset + scrinfo.green.length - 5;
+		varblock.b_offset = scrinfo.blue.offset + scrinfo.blue.length - 5;
+
+		varblock.pixels_per_int = sizeof(unsigned int) / varblock.bytespp;
 	}
 
-	if (ioctl(fbfd, FBIOGET_VSCREENINFO, &scrinfo) != 0) {
-		perror("ioctl");
-		exit(EXIT_FAILURE);
+	if (ioctl(fbfd, FBIOGET_VSCREENINFO, &scrinfo_now) < 0) {
+		pr_err("failed to get virtual screen info\n");
+		scrinfo_now.yoffset = 0;
 	}
-        if (ioctl(fbfd, FBIOGET_FSCREENINFO, &finfo) != 0) {
-                perror("ioctl FBIOGET_FSCREENINFO");
-                exit(EXIT_FAILURE);
-        }
 
-	screen_width = padded_width = scrinfo.xres;
-	screen_height = scrinfo.yres;
-
-	varblock.pixels = screen_width * screen_height;
-	varblock.bytespp = scrinfo.bits_per_pixel / 8;
-
-	pr_debug("init_fb():xres=%d, yres=%d, "
-			"xresv=%d, yresv=%d, "
-			"xoffs=%d, yoffs=%d, "
-			"bpp=%d\n",
-	  screen_width, screen_height,
-	  (int)scrinfo.xres_virtual, (int)scrinfo.yres_virtual,
-	  (int)scrinfo.xoffset, (int)scrinfo.yoffset,
-	  (int)scrinfo.bits_per_pixel);
-
-        page_mask = (unsigned long)getpagesize()-1;
-        fb_mem_offset = (unsigned long)(finfo.smem_start) & page_mask;
-
-	fbmmap = mmap(NULL, (scrinfo.yres_virtual/screen_height) * varblock.pixels * varblock.bytespp/*finfo.smem_len+fb_mem_offset*/,
-			PROT_READ, MAP_SHARED | MAP_NORESERVE, fbfd, 0);
-
-	if (fbmmap == MAP_FAILED) {
-		perror("mmap");
-		exit(EXIT_FAILURE);
+	if (scrinfo.xres != scrinfo_now.xres || scrinfo.yres != scrinfo_now.yres) {
+		resulution_changed = 1;
 	}
-	pr_debug("fbmmap addr %lx\n", (long)fbmmap);
-
-	/* Bit shifts */
-	varblock.r_offset = scrinfo.red.offset + scrinfo.red.length - 5;
-	varblock.g_offset = scrinfo.green.offset + scrinfo.green.length - 5;
-	varblock.b_offset = scrinfo.blue.offset + scrinfo.blue.length - 5;
 #endif
-	varblock.pixels_per_int = sizeof(unsigned int) / varblock.bytespp;
-
 	return resulution_changed;
 }
 
@@ -691,20 +709,6 @@ a press and release of button 5.
 }
 #endif
 
-#ifdef IMX
-static struct fb_var_screeninfo scrinfo_now;
-
-static int get_framebuffer_yoffset()
-{
-	if (ioctl(fbfd, FBIOGET_VSCREENINFO, &scrinfo_now) < 0) {
-		pr_err("failed to get virtual screen info\n");
-		return -1;
-	}
-
-	return scrinfo_now.yoffset;
-}
-#endif
-
 void blank_framebuffer()
 {
 	memset(vncbuf, 0, screen_width * screen_height / varblock.pixels_per_int);
@@ -721,7 +725,7 @@ static int update_screen(void)
 	unsigned int *f;
 	uint32_t c;
 	unsigned int *r;
-	int i, x, y, y_virtual = 0;
+	int i, x, y;
 
 #ifdef RPI
 	if (init_fb() > 0) {
@@ -741,12 +745,7 @@ static int update_screen(void)
 #endif
 
 #ifdef IMX
-	/* get virtual screen info */
-	y_virtual = get_framebuffer_yoffset();
-	if (y_virtual < 0) {
-		y_virtual = 0; /* no info, have to assume front buffer */
-	}
-	if (scrinfo.xres != scrinfo_now.xres || scrinfo.yres != scrinfo_now.yres) {
+	if (init_fb() > 0) {
 		pr_info("Screen resolution changed to %dx%d\n", scrinfo_now.xres, scrinfo_now.yres);
 		rfbProcessEvents(vncscr, 100);
 		deinit_fb();
@@ -757,8 +756,8 @@ static int update_screen(void)
 		rfbMarkRectAsModified(vncscr, 0, 0, screen_width, screen_height);
 		return TRUE;
 	}
+	pr_vdebug(" %d :::: %d \n", scrinfo_now.yoffset, varblock.pixels_per_int);
 #endif
-	pr_vdebug(" %d :::: %d \n", y_virtual, varblock.pixels_per_int);
 
 	varblock.min_x = varblock.min_y = INT_MAX;
 	varblock.max_x = varblock.max_y = -1;
@@ -766,7 +765,12 @@ static int update_screen(void)
 	/* jump to right virtual screen */
 	for (y = 0; y < screen_height; y+=cmp_lines)
 	{
-		f = (unsigned int *)(fbmmap + ((y + y_virtual) * padded_width * varblock.bytespp));
+#ifdef RPI
+		f = (unsigned int *)(fbmmap + (y * padded_width * varblock.bytespp));
+#endif
+#ifdef IMX
+		f = (unsigned int *)(fbmmap + ((y + scrinfo_now.yoffset) * padded_width * varblock.bytespp));
+#endif
 		c = XXH32((unsigned char *)f, padded_width * cmp_lines * varblock.bytespp, 0);
 		if (c == fb_hashtable[y/cmp_lines].xxh32)
 			continue;
@@ -938,8 +942,6 @@ int main(int argc, char **argv)
 			while (!vncscr->clientHead) {
 				rfbProcessEvents(vncscr, LONG_MAX);
 			}
-			init_fb();
-			blank_framebuffer(vncbuf);
 			/* Send KEY_LEFTSHIFT to wakeup screen if necessary */
 			keyevent(TRUE, 0xFFE1, NULL);
 			keyevent(FALSE, 0xFFE1, NULL);
