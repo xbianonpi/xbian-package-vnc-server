@@ -28,7 +28,7 @@
  * NOTE: depends libvncserver.
  */
 
-#define VERSION "2.4.3"
+#define VERSION "2.5.4"
 
 #ifndef IMX
 #define RPI
@@ -124,7 +124,13 @@ struct hash_t {
 
 struct hash_t *fb_hashtable;
 
-int relative_mode = 0;
+typedef enum {
+	PTR_NONE = 0,
+	PTR_ABSOLUTE,
+	PTR_RELATIVE
+} PTR_MODE;
+
+PTR_MODE ptr_mode = PTR_ABSOLUTE;
 int last_x;
 int last_y;
 int mouse_last = 0;
@@ -151,7 +157,7 @@ static struct varblock_t {
 
 /* event handler callback */
 static void keyevent(rfbBool down, rfbKeySym key, rfbClientPtr cl);
-static void doptr(int buttonMask, int x, int y, rfbClientPtr cl);
+static void ptrevent(int buttonMask, int x, int y, rfbClientPtr cl);
 
 #ifdef DEBUG
 # define pr_debug(fmt, ...) \
@@ -339,7 +345,9 @@ static void deinit_fb(void)
 
 static void init_uinput()
 {
-	struct uinput_user_dev	uinp;
+	struct uinput_setup usetup;
+	struct uinput_abs_setup uabs;
+
 	int retcode, i;
 
 	kbdfd = open("/dev/uinput", O_WRONLY | O_NDELAY );
@@ -349,21 +357,9 @@ static void init_uinput()
 		exit(-1);
 	}
 
-	memset(&uinp, 0, sizeof(uinp));
-	strncpy(uinp.name, "Dell USB Keyboard", 20);
-	uinp.id.version = 4;
-	uinp.id.bustype = BUS_USB;
-
-	if (!relative_mode) {
-		uinp.absmin[ABS_X] = 0;
-		uinp.absmax[ABS_X] = screen_width;
-		uinp.absmin[ABS_Y] = 0;
-		uinp.absmax[ABS_Y] = screen_height;
-	}
-
 	ioctl(kbdfd, UI_SET_EVBIT, EV_KEY);
 
-	for (i=0; i<KEY_MAX; i++) { //I believe this is to tell UINPUT what keys we can make?
+	for (i = 0; i < KEY_MAX; i++) { //I believe this is to tell UINPUT what keys we can make?
 		ioctl(kbdfd, UI_SET_KEYBIT, i);
 	}
 
@@ -371,26 +367,49 @@ static void init_uinput()
 	ioctl(kbdfd, UI_SET_KEYBIT, BTN_RIGHT);
 	ioctl(kbdfd, UI_SET_KEYBIT, BTN_MIDDLE);
 
-	if (relative_mode) {
-		ioctl(kbdfd, UI_SET_EVBIT, EV_REL);
-		ioctl(kbdfd, UI_SET_RELBIT, REL_X);
-		ioctl(kbdfd, UI_SET_RELBIT, REL_Y);
-	}
-	else {
-		ioctl(kbdfd, UI_SET_EVBIT, EV_ABS);
-		ioctl(kbdfd, UI_SET_ABSBIT, ABS_X);
-		ioctl(kbdfd, UI_SET_ABSBIT, ABS_Y);
+	memset(&usetup, 0, sizeof(usetup));
+	strcpy(usetup.name, "Dell USB Keyboard");
+	usetup.id.version = 4;
+	usetup.id.bustype = BUS_USB;
+	retcode = ioctl(kbdfd, UI_DEV_SETUP, &usetup);
+	pr_debug("ioctl UI_DEV_SETUP returned %d.\n", retcode);
+
+	switch (ptr_mode) {
+		case PTR_RELATIVE:
+			ioctl(kbdfd, UI_SET_EVBIT, EV_REL);
+			ioctl(kbdfd, UI_SET_RELBIT, REL_X);
+			ioctl(kbdfd, UI_SET_RELBIT, REL_Y);
+			break;
+		case PTR_ABSOLUTE:
+			ioctl(kbdfd, UI_SET_EVBIT, EV_ABS);
+
+			memset(&uabs, 0, sizeof(uabs));
+			uabs.code = ABS_X;
+			//uabs.absinfo.minimum = 0;
+			uabs.absinfo.maximum = screen_width;
+			uabs.absinfo.resolution = 10;
+			retcode = ioctl(kbdfd, UI_ABS_SETUP, &uabs);
+			pr_debug("ioctl UI_ABS_SETUP returned %d.\n", retcode);
+
+			memset(&uabs, 0, sizeof(uabs));
+			uabs.code = ABS_Y;
+			//uabs.absinfo.minimum = 0;
+			uabs.absinfo.maximum = screen_height;
+			uabs.absinfo.resolution = 10;
+			retcode = ioctl(kbdfd, UI_ABS_SETUP, &uabs);
+			pr_debug("ioctl UI_ABS_SETUP returned %d.\n", retcode);
+			break;
+		default:
+			break;
 	}
 
-	retcode = write(kbdfd, &uinp, sizeof(uinp));
-	pr_debug("First write returned %d.\n", retcode);
-
-	retcode = (ioctl(kbdfd, UI_DEV_CREATE));
+	retcode = ioctl(kbdfd, UI_DEV_CREATE);
 	pr_debug("ioctl UI_DEV_CREATE returned %d.\n", retcode);
 	if (retcode) {
 		pr_err("Error create uinput device %d.\n", retcode);
 		exit(-1);
 	}
+
 }
 
 static void cleanup_kbd()
@@ -436,7 +455,9 @@ static void init_fb_server(int argc, char **argv)
 	vncscr->alwaysShared = TRUE;
 
 	vncscr->kbdAddEvent = keyevent;
-	vncscr->ptrAddEvent = doptr;
+	if (ptr_mode != PTR_NONE) {
+		vncscr->ptrAddEvent = ptrevent;
+	}
 
 	rfbInitServer(vncscr);
 	/* Mark as dirty since we haven't sent any updates at all yet. */
@@ -564,124 +585,116 @@ static int keysym2scancode(rfbKeySym key)
     return scancode;
 }
 
-static void keyevent(rfbBool down, rfbKeySym key, rfbClientPtr cl)
+typedef struct kev_event {
+	struct input_event key;
+	struct input_event syn;
+} KEY_EVENT;
+
+static void kev(unsigned int key, int down)
 {
-	struct input_event event;
+	KEY_EVENT kev;
 
-	memset(&event, 0, sizeof(event));
-	gettimeofday(&event.time, NULL);
-	event.type = EV_KEY;
-	event.code = keysym2scancode(key); //nomodifiers!
-	event.value = down ? 1: 0 ; //key pressed/released
-	write(kbdfd, &event, sizeof(event));
-	pr_debug("key event %04x down\n", event.code);
+	memset(&kev, 0, sizeof(kev));
 
-	memset(&event, 0, sizeof(event));
-	gettimeofday(&event.time, NULL);
-	event.type = EV_SYN;
-	event.code = SYN_REPORT; //not sure what this is for? i'm guessing its some kind of sync thing?
-	event.value = 0;
-	write(kbdfd, &event, sizeof(event));
+	gettimeofday(&kev.key.time, NULL);
+	kev.syn.time = kev.key.time;
+	kev.key.type = EV_KEY;
+	kev.key.code = key;
+	kev.key.value = down ? 1: 0 ; //key pressed/released
+	kev.syn.type = EV_SYN;
+	kev.syn.code = SYN_REPORT; //not sure what this is for? i'm guessing its some kind of sync thing?
+	write(kbdfd, &kev, sizeof(kev));
+
+	pr_debug("key event %04x %s\n", kev.key.code, down ? "pressed" : "released");
 }
 
-static void doptr(int buttonMask, int x, int y, rfbClientPtr cl)
+static void keyevent(rfbBool down, rfbKeySym key, rfbClientPtr cl)
 {
-        struct input_event       event;
+	kev(keysym2scancode(key), down);
+}
 
-        //printf("mouse: 0x%x at %d,%d\n", buttonMask, x,y);
+typedef struct ptr_event {
+	struct input_event ptr_x;
+	struct input_event ptr_y;
+	struct input_event syn;
+} PTR_EVENT;
 
-        memset(&event, 0, sizeof(event));
-        gettimeofday(&event.time, NULL);
-        if (relative_mode) {
-                event.type = EV_REL;
-                event.code = REL_X;
-                event.value = x - last_x;
-        }
-        else {
-                event.type = EV_ABS;
-                event.code = ABS_X;
-                event.value = x;
-        }
-        write(kbdfd, &event, sizeof(event));
+static void ptrevent(int buttonMask, int x, int y, rfbClientPtr cl)
+{
+	PTR_EVENT pev;
 
-        memset(&event, 0, sizeof(event));
-        gettimeofday(&event.time, NULL);
-        if (relative_mode) {
-                event.type = EV_REL;
-                event.code = REL_Y;
-                event.value = y - last_y;
-        }
-        else {
-                event.type = EV_ABS;
-                event.code = ABS_Y;
-                event.value = y;
-        }
-        write(kbdfd, &event, sizeof(event));
+	memset(&pev, 0, sizeof(pev));
 
-        last_x = x;
-        last_y = y;
+	gettimeofday(&pev.ptr_x.time, NULL);
+	pev.ptr_y.time = pev.syn.time = pev.ptr_x.time;
 
-        memset(&event, 0, sizeof(event));
-        gettimeofday(&event.time, NULL);
-        event.type = EV_SYN;
-        event.code = SYN_REPORT;
-        event.value = 0;
-        write(kbdfd, &event, sizeof(event));
+	pev.syn.type = EV_SYN;
+	pev.syn.code = SYN_REPORT;
+
+	int sync_xy = 0;
+
+	switch (ptr_mode) {
+		case PTR_RELATIVE:
+			pev.ptr_x.type = pev.ptr_y.type = EV_REL;
+			pev.ptr_x.code = REL_X;
+			pev.ptr_y.code = REL_Y;
+			if (x <= 0) {
+				pev.ptr_x.value = 1 - screen_width;
+				sync_xy = 1;
+			}
+			else if (x >= (screen_width - 1)) {
+				pev.ptr_x.value = screen_width - 1;
+				sync_xy = 1;
+			}
+			else {
+				pev.ptr_x.value = x - last_x;
+				last_x = x;
+			}
+			if (y <= 0) {
+				pev.ptr_y.value = 1 - screen_height;
+				sync_xy = 1;
+			}
+			else if (y >= (screen_height - 1)) {
+				pev.ptr_y.value = screen_height - 1;
+				sync_xy = 1;
+			}
+			else {
+				pev.ptr_y.value = y - last_y;
+				last_y = y;
+			}
+			last_x = x;
+			last_y = y;
+			if (sync_xy) {
+				pr_debug("ptr event x=%d, y=%d, dx=%d, dy=%d\n", x, y, pev.ptr_x.value, pev.ptr_y.value);
+			}
+			break;
+		case PTR_ABSOLUTE:
+			pev.ptr_x.type = pev.ptr_y.type = EV_ABS;
+			pev.ptr_x.code = ABS_X;
+			pev.ptr_y.code = ABS_Y;
+			pev.ptr_x.value = x;
+			pev.ptr_y.value = y;
+			break;
+	}
+	write(kbdfd, &pev, sizeof(pev));
+
         if (mouse_last != buttonMask) {
                 int left_l = mouse_last & 0x1;
                 int left_w = buttonMask & 0x1;
-
                 if (left_l != left_w) {
-                        memset(&event, 0, sizeof(event));
-                        gettimeofday(&event.time, NULL);
-                        event.type = EV_KEY;
-                        event.code = BTN_LEFT;
-                        event.value = left_w;
-                        write(kbdfd, &event, sizeof(event));
-
-                        memset(&event, 0, sizeof(event));
-                        gettimeofday(&event.time, NULL);
-                        event.type = EV_SYN;
-                        event.code = SYN_REPORT;
-                        event.value = 0;
-                        write(kbdfd, &event, sizeof(event));
+			kev(BTN_LEFT, left_w);
                 }
 
                 int middle_l = mouse_last & 0x2;
                 int middle_w = buttonMask & 0x2;
-
-                if (middle_l != middle_w) {
-                        memset(&event, 0, sizeof(event));
-                        gettimeofday(&event.time, NULL);
-                        event.type = EV_KEY;
-                        event.code = BTN_MIDDLE;
-                        event.value = middle_w >> 1;
-                        write(kbdfd, &event, sizeof(event));
-
-                        memset(&event, 0, sizeof(event));
-                        gettimeofday(&event.time, NULL);
-                        event.type = EV_SYN;
-                        event.code = SYN_REPORT;
-                        event.value = 0;
-                        write(kbdfd, &event, sizeof(event));
+		if (middle_l != middle_w) {
+			kev(BTN_MIDDLE, middle_w >> 1);
                 }
+
                 int right_l = mouse_last & 0x4;
                 int right_w = buttonMask & 0x4;
-
-                if (right_l != right_w) {
-                        memset(&event, 0, sizeof(event));
-                        gettimeofday(&event.time, NULL);
-                        event.type = EV_KEY;
-                        event.code = BTN_RIGHT;
-                        event.value = right_w >> 2;
-                        write(kbdfd, &event, sizeof(event));
-
-                        memset(&event, 0, sizeof(event));
-                        gettimeofday(&event.time, NULL);
-                        event.type = EV_SYN;
-                        event.code = SYN_REPORT;
-                        event.value = 0;
-                        write(kbdfd, &event, sizeof(event));
+		if (right_l != right_w) {
+			kev(BTN_RIGHT, right_w >> 2);
                 }
 
                 mouse_last = buttonMask;
@@ -829,7 +842,7 @@ static int update_screen(void)
 
 void print_usage(char **argv)
 {
-	pr_info("%s version %s\nusage:\n  %s [-c lines] %s[-u msec] [-h[ rfb]]\n",
+	pr_info("%s version %s\nusage:\n  %s [-c lines] %s[-p mode] [-u msec] [-h[ rfb]]\n",
 		APPNAME, VERSION, APPNAME,
 #ifdef DEBUG
 		"[-d] "
@@ -839,7 +852,8 @@ void print_usage(char **argv)
 		);
 	pr_info("    -c     : use <lines> lines for hashing (default %d)\n", cmp_lines);
 	pr_info("    -d[d]  : enable debug output, -dd is more verbose\n");
-	pr_info("    -u     : polling screen interval in <msec> ms (default %d) \n", update_usec / 1000);
+	pr_info("    -p     : use <mode> as pointer mode (none, abs, rel)\n");
+	pr_info("    -u     : polling screen interval in <msec> ms (default %d)\n", update_usec / 1000);
 	pr_info("    -h     : print this help\n");
 	pr_info("    -h rfb : print additional rfb options\n");
 }
@@ -890,6 +904,19 @@ int main(int argc, char **argv)
 						break;
 					case 'c':
 						cmp_lines = atoi(argv[++i]);
+						break;
+					case 'p':
+						if (++i < argc) {
+							if (strcmp(argv[i], "none") == 0) {
+								ptr_mode = PTR_NONE;
+							}
+							else if (strcmp(argv[i], "abs") == 0) {
+								ptr_mode = PTR_ABSOLUTE;
+							}
+							else if (strcmp(argv[i], "rel") == 0) {
+								ptr_mode = PTR_RELATIVE;
+							}
+						}
 						break;
 					case 'd':
 						debug = 1;
