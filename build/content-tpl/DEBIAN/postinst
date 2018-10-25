@@ -11,7 +11,7 @@ if [ $1 == "configure" ]; then
 
     chown -R xbian:xbian /home/xbian/.vnc
 
-    reload -q vnc-server 2>/dev/null || :
+    LC_ALL=C netstat -anpt | grep -q "ESTABLISHED.*vncserver" || reload -q vnc-server 2>/dev/null || :
 fi
 
 exit 0
