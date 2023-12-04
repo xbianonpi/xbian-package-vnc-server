@@ -28,10 +28,10 @@
  * NOTE: depends libvncserver.
  */
 
-#define VERSION "2.5.4"
+#define VERSION "2.6.2"
 
-#ifndef IMX
-#define RPI
+#ifndef WITH_FB
+#define WITH_DISPMANX
 #endif
 
 /* define the following to enable debug messages */
@@ -67,16 +67,16 @@
 #include "rfb/keysym.h"
 #include "rfb/rfbregion.h"
 
-#ifdef RPI
+#ifdef WITH_DISPMANX
 #include "bcm_host.h"
 #endif
 
 /* framebuffer */
-#ifdef RPI
+#ifdef WITH_DISPMANX
 #define FB_DEVICE "- (dispmanx)"
 #endif
 
-#ifdef IMX
+#ifdef WITH_FB
 #define FB_DEVICE "/dev/fb0"
 #endif
 
@@ -86,10 +86,10 @@
 #define KEY_SHARP KEY_UNKNOWN
 #define KEY_STAR KEY_UNKNOWN
 
-#ifdef IMX
-#define APPNAME "imx-vncserver"
+#ifdef WITH_FB
+#define APPNAME "fb-vncserver"
 #endif
-#ifdef RPI
+#ifdef WITH_DISPMANX
 #define APPNAME "rpi-vncserver"
 #endif
 
@@ -122,7 +122,7 @@ struct hash_t {
 	uint32_t xxh32;
 };
 
-struct hash_t *fb_hashtable;
+struct hash_t *fb_hashtable = NULL;
 
 typedef enum {
 	PTR_NONE = 0,
@@ -180,13 +180,13 @@ static void ptrevent(int buttonMask, int x, int y, rfbClientPtr cl);
 	fprintf(stderr, fmt, ## __VA_ARGS__)
 
 
-#ifdef IMX
+#ifdef WITH_FB
 static struct fb_var_screeninfo scrinfo;
 static struct fb_var_screeninfo scrinfo_now;
 static int fbfd = -1;
 #endif
 
-#ifdef RPI
+#ifdef WITH_DISPMANX
 unsigned long pitch;
 DISPMANX_DISPLAY_HANDLE_T   display = DISPMANX_NO_HANDLE;
 DISPMANX_RESOURCE_HANDLE_T  resource;
@@ -201,13 +201,11 @@ int padded_width;
 int screen_width = 0;
 int screen_height = 0;
 
-int screen_maxwidth = SCREEN_MAXWIDTH;
-int screen_maxheight = SCREEN_MAXHEIGHT;
-
 static int init_fb(void)
 {
-	int		resulution_changed = 0;
-#ifdef RPI
+	int		resolution_changed = 0;
+	int		width_aligned;
+#ifdef WITH_DISPMANX
 	uint32_t	vc_image_ptr;
 
 	if (display == DISPMANX_NO_HANDLE) {
@@ -217,7 +215,7 @@ static int init_fb(void)
 		assert(ret == 0);
 
 		if (screen_width != scrinfo.width || screen_height != scrinfo.height) {
-			resulution_changed = 1;
+			resolution_changed = 1;
 		}
 
 		screen_width = scrinfo.width;
@@ -227,13 +225,11 @@ static int init_fb(void)
 		pitch = ALIGN_UP(SCREEN_BYTESPP * screen_width, 32);
 		padded_width = pitch/SCREEN_BYTESPP;
 
-		screen_maxwidth = ALIGN_UP(SCREEN_BYTESPP * SCREEN_MAXWIDTH, 32) / SCREEN_BYTESPP;
-
 		varblock.pixels = screen_width * screen_height;
 		varblock.bytespp = SCREEN_BYTESPP;
 
 		resource = vc_dispmanx_resource_create(type, screen_width, screen_height, &vc_image_ptr);
-		if (resulution_changed) {
+		if (resolution_changed) {
 			pr_debug("init_fb(): xres=%d, yres=%d, bpp=%d\n",  screen_width, screen_height, (int)varblock.bytespp * 8);
 		}
 		else {
@@ -248,7 +244,7 @@ static int init_fb(void)
 		varblock.pixels_per_int = sizeof(unsigned int) / varblock.bytespp;
 	}
 #endif
-#ifdef IMX
+#ifdef WITH_FB
         struct fb_fix_screeninfo finfo;
         unsigned long page_mask, fb_mem_offset;
 
@@ -268,7 +264,7 @@ static int init_fb(void)
 		}
 
 		if (screen_width != scrinfo.xres || screen_height != screen_height) {
-			resulution_changed = 1;
+			resolution_changed = 1;
 		}
 
 		screen_width = padded_width = scrinfo.xres;
@@ -280,11 +276,11 @@ static int init_fb(void)
 		pr_debug("init_fb():xres=%d, yres=%d, "
 				"xresv=%d, yresv=%d, "
 				"xoffs=%d, yoffs=%d, "
-				"bpp=%d\n",
+				"bpp=%d, rchanged=%d\n",
 		  screen_width, screen_height,
 		  (int)scrinfo.xres_virtual, (int)scrinfo.yres_virtual,
 		  (int)scrinfo.xoffset, (int)scrinfo.yoffset,
-		  (int)scrinfo.bits_per_pixel);
+		  (int)scrinfo.bits_per_pixel, resolution_changed);
 
 		page_mask = (unsigned long)getpagesize()-1;
 		fb_mem_offset = (unsigned long)(finfo.smem_start) & page_mask;
@@ -312,16 +308,49 @@ static int init_fb(void)
 	}
 
 	if (scrinfo.xres != scrinfo_now.xres || scrinfo.yres != scrinfo_now.yres) {
-		resulution_changed = 1;
+		resolution_changed = 1;
 	}
 #endif
-	return resulution_changed;
+	if (resolution_changed) {
+#ifdef WITH_DISPMANX
+		width_aligned = ALIGN_UP(SCREEN_BYTESPP * screen_width, 32) / SCREEN_BYTESPP;
+#else
+		width_aligned = screen_width;
+#endif
+		if (vncbuf == NULL) {
+			vncbuf = calloc((width_aligned + 1) * (screen_height + 1), varblock.bytespp);
+		}
+		else {
+			vncbuf = realloc(vncbuf, (width_aligned + 1) * (screen_height + 1) * varblock.bytespp);
+		}
+		assert(vncbuf);
+
+		/* Allocate the comparison buffer for detecting drawing updates from frame
+		 * to frame. */
+		if (fb_hashtable == NULL) {
+			fb_hashtable = calloc(screen_height / cmp_lines, sizeof(struct hash_t));
+		}
+		else {
+			fb_hashtable = realloc(fb_hashtable, (screen_height / cmp_lines) * sizeof(struct hash_t));
+		}
+		assert(fb_hashtable);
+#ifdef WITH_DISPMANX
+		if (fbmmap == MAP_FAILED) {
+			fbmmap = calloc(width_aligned * screen_height, varblock.bytespp);
+		}
+		else {
+			fbmmap = realloc(fbmmap, width_aligned * screen_height *  varblock.bytespp);
+		}
+		assert(fbmmap);
+#endif
+	}
+	return resolution_changed;
 }
 
 
 static void deinit_fb(void)
 {
-#ifdef RPI
+#ifdef WITH_DISPMANX
 	if (display != DISPMANX_NO_HANDLE) {
 		pr_vdebug("deinit_fb()\n");
 		vc_dispmanx_resource_delete(resource);
@@ -329,7 +358,7 @@ static void deinit_fb(void)
 		display = DISPMANX_NO_HANDLE;
 	}
 #endif
-#ifdef IMX
+#ifdef WITH_FB
         if (fbmmap) {
 		pr_vdebug("deinit_fb()\n");
 		munmap(fbmmap, (scrinfo.yres_virtual/screen_height) * varblock.pixels * varblock.bytespp);
@@ -430,6 +459,7 @@ static void init_fb_server(int argc, char **argv)
 		rfbLogEnable(0);
 	}
 
+#if 0
 	/* Allocate the VNC server buffer to be managed (not manipulated) by 
 	 * libvncserver. */
 	vncbuf = calloc(screen_maxwidth * screen_maxheight, varblock.bytespp);
@@ -439,9 +469,10 @@ static void init_fb_server(int argc, char **argv)
 	 * to frame. */
 	fb_hashtable = calloc(screen_maxheight / cmp_lines, sizeof(struct hash_t));
 	assert(fb_hashtable);
-#ifdef RPI
+#ifdef WITH_DISPMANX
 	fbmmap = calloc(screen_maxwidth * screen_maxheight, varblock.bytespp);
 	assert(fbmmap);
+#endif
 #endif
 	vncscr = rfbGetScreen(&argc, argv, padded_width, screen_height,
 			5, /* 8 bits per sample */
@@ -740,7 +771,7 @@ static int update_screen(void)
 	unsigned int *r;
 	int i, x, y;
 
-#ifdef RPI
+#ifdef WITH_DISPMANX
 	if (init_fb() > 0) {
 		pr_info("Screen resolution changed to %dx%d\n",  scrinfo.width, scrinfo.height);
 		rfbProcessEvents(vncscr, 100);
@@ -757,7 +788,7 @@ static int update_screen(void)
 	deinit_fb();
 #endif
 
-#ifdef IMX
+#ifdef WITH_FB
 	if (init_fb() > 0) {
 		pr_info("Screen resolution changed to %dx%d\n", scrinfo_now.xres, scrinfo_now.yres);
 		rfbProcessEvents(vncscr, 100);
@@ -778,10 +809,10 @@ static int update_screen(void)
 	/* jump to right virtual screen */
 	for (y = 0; y < screen_height; y+=cmp_lines)
 	{
-#ifdef RPI
+#ifdef WITH_DISPMANX
 		f = (unsigned int *)(fbmmap + (y * padded_width * varblock.bytespp));
 #endif
-#ifdef IMX
+#ifdef WITH_FB
 		f = (unsigned int *)(fbmmap + ((y + scrinfo_now.yoffset) * padded_width * varblock.bytespp));
 #endif
 		c = XXH32((unsigned char *)f, padded_width * cmp_lines * varblock.bytespp, 0);
@@ -860,13 +891,13 @@ void print_usage(char **argv)
 
 void exit_cleanup(void)
 {
-#ifdef RPI
+#ifdef WITH_DISPMANX
 	if (fbmmap)
 		free(fbmmap);
 	bcm_host_deinit();
 #endif
 	pr_info("Cleaning up...\n");
-#ifdef IMX
+#ifdef WITH_FB
 	deinit_fb();
 #endif
 	cleanup_kbd();
@@ -934,7 +965,7 @@ int main(int argc, char **argv)
 
 	pr_info("%s version %s\n\n", APPNAME, VERSION);
 	pr_info("Initializing framebuffer device: %s\n", FB_DEVICE);
-#ifdef RPI
+#ifdef WITH_DISPMANX
 	bcm_host_init();
 #endif
 	init_fb();
@@ -959,6 +990,8 @@ int main(int argc, char **argv)
 
 	pr_info("\nsuccessfully started\n");
 
+	int wake_screen = 0;
+
 	/* Implement our own event loop to detect changes in the framebuffer. */
 	while (1) {
 		rfbClientPtr client_ptr;
@@ -967,15 +1000,19 @@ int main(int argc, char **argv)
 			deinit_fb();
 			/* sleep until getting a client */
 			while (!vncscr->clientHead) {
-				rfbProcessEvents(vncscr, LONG_MAX);
+				rfbProcessEvents(vncscr, 2147483647);
 			}
-			/* Send KEY_LEFTSHIFT to wakeup screen if necessary */
-			keyevent(TRUE, 0xFFE1, NULL);
-			keyevent(FALSE, 0xFFE1, NULL);
+			wake_screen = 1;
 		}
 
 		/* scan screen if at least one client has requested */
 		for (client_ptr = vncscr->clientHead; client_ptr; client_ptr = client_ptr->next) {
+			if (wake_screen) {
+				/* Send KEY_LEFTSHIFT to wakeup screen if necessary */
+				keyevent(TRUE, 0xFFE1, NULL);
+				keyevent(FALSE, 0xFFE1, NULL);
+				wake_screen = 0;
+			}
 			if (!sraRgnEmpty(client_ptr->requestedRegion)) {
 				if (update_screen()) {
 					break;
