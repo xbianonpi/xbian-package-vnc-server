@@ -1,1 +1,2 @@
+CROSS_COMPILE=arm-linux-gnueabihf-
 CFLAGS=-O3 -mtune=cortex-a7 -mcpu=cortex-a7 -mfloat-abi=hard -mfpu=neon -mabi=aapcs-linux -Wno-psabi -I/opt/vc/include/ -I/opt/vc/include/interface/vcos/pthreads -I/opt/vc/include/interface/vmcs_host/linux -L/opt/vc/lib/

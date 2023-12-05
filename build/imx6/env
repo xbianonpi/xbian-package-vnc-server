@@ -1,3 +1,4 @@
+CROSS_COMPILE=arm-linux-gnueabihf-
 CFLAGS=-O3 -g -pipe -march=armv7-a -mtune=cortex-a9 -mcpu=cortex-a9 -mfloat-abi=hard -mfpu=neon -mabi=aapcs-linux -Wno-psabi -Wa,-mno-warn-deprecated -Wno-deprecated-declarations
 CPPFLAGS=$CFLAGS
 CXXFLAGS=$CFLAGS
