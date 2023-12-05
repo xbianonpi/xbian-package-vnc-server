@@ -1,4 +1,4 @@
-etc/init/vnc-server.override
-etc/default/vnc-autores
-etc/default/vnc-server
-home/xbian/.vnc/passwd
+/etc/init/vnc-server.override
+/etc/default/vnc-autores
+/etc/default/vnc-server
+/home/xbian/.vnc/passwd
