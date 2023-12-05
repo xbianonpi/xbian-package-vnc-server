@@ -1,3 +1,4 @@
 rpi  stable rpi-${config_os_version}
 rpi2 stable rpi2-${config_os_version}
 imx6 stable imx6-${config_os_version}
+arm64 stable imx6-${config_os_version}
